@@ -1,0 +1,36 @@
+{
+  "sessionId": "thread-1743027810536-d64mqq0",
+  "threadId": "thread-1743027810536-d64mqq0",
+  "conversationId": "thread-1743027810536-d64mqq0",
+  "startTime": "2025-03-31T15:58:49.892Z",
+  "status": "completed",
+  "interactions": [
+    {
+      "fromAgent": "CompletionAgent",
+      "toAgent": "__end__",
+      "messageContent": "{}",
+      "timestamp": "2025-03-31T15:58:54.106Z",
+      "metrics": {
+        "latency": 4210,
+        "tokensUsed": 0,
+        "promptTokens": 0,
+        "completionTokens": 0,
+        "retries": 0
+      }
+    }
+  ],
+  "metrics": {
+    "totalDuration": 4217,
+    "totalInteractions": 1,
+    "uniqueAgents": [
+      "CompletionAgent",
+      "__end__"
+    ],
+    "errorCount": 0,
+    "averageLatency": 4210,
+    "totalTokensUsed": 0
+  },
+  "errors": [],
+  "mermaidDiagram": "sequenceDiagram\n    participant User\n    participant CompletionAgent\n    participant __end__\n    CompletionAgent->>+User: {}...\n    Note over CompletionAgent,User: Latency: 4210ms\n",
+  "endTime": "2025-03-31T15:58:54.109Z"
+}

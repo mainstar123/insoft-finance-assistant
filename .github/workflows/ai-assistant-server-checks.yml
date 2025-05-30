@@ -1,0 +1,76 @@
+name: AI Assistant Server Checks
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'packages/ai-assistant-server/**'
+      - 'shared/**'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'tsconfig.base.json'
+
+jobs:
+  pnpm_setup:
+    uses: ./.github/workflows/reusable-pnpm-setup.yml
+
+  lint:
+    name: Lint AI Assistant Server
+    runs-on: ubuntu-latest
+    needs: pnpm_setup
+    steps:
+      - uses: ./.github/workflows/reusable-pnpm-setup.yml@main
+      - name: Install dependencies
+        run: pnpm install
+      - name: Run linting
+        run: pnpm --filter=@tamy-project/ai-assistant-server lint
+
+  test:
+    name: Test AI Assistant Server
+    runs-on: ubuntu-latest
+    needs: pnpm_setup
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test
+        ports:
+          - 4500:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: ./.github/workflows/reusable-pnpm-setup.yml@main
+      - name: Install dependencies
+        run: pnpm install
+      - name: Run tests
+        run: pnpm --filter=@tamy-project/ai-assistant-server test
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:4500/test
+          REDIS_URL: redis://localhost:6379
+          NODE_ENV: test
+
+  build:
+    name: Build AI Assistant Server
+    runs-on: ubuntu-latest
+    needs: pnpm_setup
+    steps:
+      - uses: ./.github/workflows/reusable-pnpm-setup.yml@main
+      - name: Install dependencies
+        run: pnpm install
+      - name: Build package
+        run: pnpm --filter=@tamy-project/ai-assistant-server build

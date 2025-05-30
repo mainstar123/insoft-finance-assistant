@@ -1,0 +1,529 @@
+{
+  "version": "7.0",
+  "data_api_version": "3.0",
+  "routing_model": {
+    "ENTRY": ["ACCOUNT_CREATION_BASIC"],
+    "ACCOUNT_CREATION_BASIC": ["ACCOUNT_CREATION_PERSONAL"],
+    "ACCOUNT_CREATION_PERSONAL": ["ACCOUNT_CREATION_GOALS"],
+    "ACCOUNT_CREATION_GOALS": ["ACCOUNT_CREATION_SUCCESS"]
+  },
+  "screens": [
+    {
+      "id": "ENTRY",
+      "title": "Bem-vindo à Tamy",
+      "data": {},
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          {
+            "type": "TextHeading",
+            "text": "Eu sou a Tamy, sua mentora financeira 💜"
+          },
+          {
+            "type": "TextBody",
+            "text": "Que tal descomplicar sua vida financeira? Sou uma assistente que usa IA para te ajudar a realizar seus sonhos, sem mimimi e sem complicação! 🚀"
+          },
+          {
+            "type": "TextBody",
+            "text": "🧠 Sua parceira inteligente\n• Aprendo com você e evoluo junto\n• Dou dicas que fazem sentido pro seu momento\n• Prevejo gastos antes que eles te surpreendam"
+          },
+          {
+            "type": "TextBody",
+            "text": "💰 Simplifiquei tudo pra você\n• Organize grana sem dor de cabeça\n• Acompanhe gastos numa tacada só\n• Veja seu dinheiro crescer com metas realistas\n• Relatórios que até sua vó entenderia"
+          },
+          {
+            "type": "TextBody",
+            "text": "🎯 Mentoria personalizada\n• Categorias que combinam com você\n• Dicas baseadas no seu jeito\n• Alertas na hora certa\n• Conteúdo no seu nível"
+          },
+          {
+            "type": "Footer",
+            "label": "Bora começar? 🚀",
+            "on-click-action": {
+              "name": "navigate",
+              "next": {
+                "type": "screen",
+                "name": "ACCOUNT_CREATION_BASIC"
+              },
+              "payload": {
+                "phone_number": "${data.phone_number}"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "ACCOUNT_CREATION_BASIC",
+      "title": "Crie sua conta",
+      "data": {},
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          {
+            "type": "Form",
+            "name": "account_creation_basic_form",
+            "children": [
+              {
+                "type": "TextHeading",
+                "text": "Crie sua conta"
+              },
+              {
+                "type": "TextBody",
+                "text": "Etapa 1 de 4: Vamos configurar sua conta Tamy Finance com algumas informações básicas."
+              },
+              {
+                "type": "TextBody",
+                "text": "Digite seu nome completo"
+              },
+              {
+                "type": "TextInput",
+                "required": true,
+                "label": "Nome Completo",
+                "name": "name",
+                "input-type": "text"
+              },
+              {
+                "type": "TextBody",
+                "text": "Digite seu endereço de e-mail"
+              },
+              {
+                "type": "TextInput",
+                "required": true,
+                "label": "Endereço de e-mail",
+                "name": "email",
+                "input-type": "email"
+              },
+              {
+                "type": "TextBody",
+                "text": "Crie uma senha (mínimo de 6 caracteres)"
+              },
+              {
+                "type": "TextInput",
+                "required": true,
+                "label": "Senha",
+                "name": "password",
+                "input-type": "password"
+              },
+              {
+                "type": "TextBody",
+                "text": "Ao criar uma conta, você concorda com nossos Termos de Serviço e Política de Privacidade."
+              },
+              {
+                "type": "OptIn",
+                "name": "termsAccepted",
+                "label": "Eu concordo com os Termos e Condições",
+                "required": true
+              },
+              {
+                "type": "Footer",
+                "label": "Continuar",
+                "on-click-action": {
+                  "name": "navigate",
+                  "next": {
+                    "type": "screen",
+                    "name": "ACCOUNT_CREATION_PERSONAL"
+                  },
+                  "payload": {
+                    "name": "${form.name}",
+                    "email": "${form.email}",
+                    "password": "${form.password}",
+                    "termsAccepted": "${form.termsAccepted}",
+                    "phone_number": "${data.phone_number}"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "ACCOUNT_CREATION_PERSONAL",
+      "title": "Informações Pessoais",
+      "data": {
+        "name": {
+          "type": "string",
+          "__example__": "João Silva"
+        },
+        "email": {
+          "type": "string",
+          "__example__": "joao.silva@exemplo.com"
+        },
+        "password": {
+          "type": "string",
+          "__example__": "senha123"
+        },
+        "termsAccepted": {
+          "type": "boolean",
+          "__example__": true
+        }
+      },
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          {
+            "type": "Form",
+            "name": "account_personal_form",
+            "children": [
+              {
+                "type": "TextHeading",
+                "text": "Informações Pessoais"
+              },
+              {
+                "type": "TextBody",
+                "text": "Etapa 2 de 4: Conte-nos um pouco mais sobre você para personalizar sua experiência."
+              },
+              {
+                "type": "TextBody",
+                "text": "Digite sua data de nascimento (para conselhos financeiros adequados à sua idade)"
+              },
+              {
+                "type": "DatePicker",
+                "label": "Data de Nascimento",
+                "name": "birthDate",
+                "required": true
+              },
+              {
+                "type": "RadioButtonsGroup",
+                "name": "gender",
+                "label": "Selecione seu gênero (para experiência personalizada)",
+                "data-source": [
+                  {
+                    "id": "MALE",
+                    "title": "Masculino"
+                  },
+                  {
+                    "id": "FEMALE",
+                    "title": "Feminino"
+                  },
+                  {
+                    "id": "OTHER",
+                    "title": "Outro"
+                  }
+                ],
+                "required": true
+              },
+              {
+                "type": "TextBody",
+                "text": "Digite seu CEP (para configurações regionais)"
+              },
+              {
+                "type": "TextInput",
+                "required": true,
+                "name": "postalCode",
+                "label": "CEP",
+                "input-type": "text"
+              },
+              {
+                "type": "Footer",
+                "label": "Continuar",
+                "on-click-action": {
+                  "name": "navigate",
+                  "next": {
+                    "type": "screen",
+                    "name": "ACCOUNT_CREATION_GOALS"
+                  },
+                  "payload": {
+                    "name": "${data.name}",
+                    "email": "${data.email}",
+                    "password": "${data.password}",
+                    "termsAccepted": "${data.termsAccepted}",
+                    "birthDate": "${form.birthDate}",
+                    "gender": "${form.gender}",
+                    "postalCode": "${form.postalCode}",
+                    "phone_number": "${data.phone_number}"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "ACCOUNT_CREATION_GOALS",
+      "title": "Objetivos Financeiros",
+      "data": {
+        "name": {
+          "type": "string",
+          "__example__": "João Silva"
+        },
+        "email": {
+          "type": "string",
+          "__example__": "joao.silva@exemplo.com"
+        },
+        "password": {
+          "type": "string",
+          "__example__": "senha123"
+        },
+        "termsAccepted": {
+          "type": "boolean",
+          "__example__": true
+        },
+        "birthDate": {
+          "type": "string",
+          "__example__": "1990-01-01"
+        },
+        "gender": {
+          "type": "string",
+          "__example__": "Masculino"
+        },
+        "postalCode": {
+          "type": "string",
+          "__example__": "12345-678"
+        }
+      },
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          {
+            "type": "Form",
+            "name": "account_goals_form",
+            "children": [
+              {
+                "type": "TextHeading",
+                "text": "Vamo nessa! 🎯"
+              },
+              {
+                "type": "TextBody",
+                "text": "Etapa 3 de 4: Me conta um pouco mais sobre você pra eu ser a melhor mentora possível!"
+              },
+              {
+                "type": "TextBody",
+                "text": "Como você se sente em relação a finanças? Seja sincero(a)! 😊"
+              },
+              {
+                "type": "RadioButtonsGroup",
+                "name": "financialKnowledge",
+                "label": "Seu nível de conhecimento",
+                "required": true,
+                "data-source": [
+                  {
+                    "id": "NO_KNOWLEDGE",
+                    "title": "Tô perdido(a) total! 😅"
+                  },
+                  {
+                    "id": "BEGINNER",
+                    "title": "Sei o básico do básico"
+                  },
+                  {
+                    "id": "INTERMEDIATE",
+                    "title": "Me viro bem! 💪"
+                  },
+                  {
+                    "id": "ADVANCED",
+                    "title": "Mando muito bem 🎯"
+                  },
+                  {
+                    "id": "EXPERT",
+                    "title": "Sou expert no assunto! 🏆"
+                  }
+                ]
+              },
+              {
+                "type": "TextBody",
+                "text": "Qual sonho você quer realizar primeiro? 💭"
+              },
+              {
+                "type": "RadioButtonsGroup",
+                "name": "financialGoal",
+                "label": "Selecione seu objetivo principal",
+                "required": true,
+                "data-source": [
+                  {
+                    "id": "SAVE_MONEY",
+                    "title": "Economizar dinheiro"
+                  },
+                  {
+                    "id": "TRACK_EXPENSES",
+                    "title": "Acompanhar despesas diárias"
+                  },
+                  {
+                    "id": "PAY_DEBT",
+                    "title": "Pagar dívidas"
+                  },
+                  {
+                    "id": "BUILD_EMERGENCY_FUND",
+                    "title": "Criar fundo de emergência"
+                  },
+                  {
+                    "id": "PLAN_RETIREMENT",
+                    "title": "Planejar aposentadoria"
+                  },
+                  {
+                    "id": "INVEST",
+                    "title": "Investir para crescimento"
+                  },
+                  {
+                    "id": "BUY_PROPERTY",
+                    "title": "Comprar um imóvel"
+                  },
+                  {
+                    "id": "START_BUSINESS",
+                    "title": "Abrir um negócio"
+                  },
+                  {
+                    "id": "EDUCATION",
+                    "title": "Investir em educação"
+                  },
+                  {
+                    "id": "TRAVEL",
+                    "title": "Planejar uma viagem"
+                  },
+                  {
+                    "id": "VEHICLE",
+                    "title": "Comprar um veículo"
+                  }
+                ]
+              },
+              {
+                "type": "TextBody",
+                "text": "Quer ficar por dentro das novidades e dicas exclusivas? 💜"
+              },
+              {
+                "type": "OptIn",
+                "name": "marketingConsent",
+                "label": "Quero receber conteúdo personalizado da Tamy"
+              },
+              {
+                "type": "Footer",
+                "label": "Vamo nessa! 🚀",
+                "on-click-action": {
+                  "name": "navigate",
+                  "next": {
+                    "type": "screen",
+                    "name": "ACCOUNT_CREATION_SUCCESS"
+                  },
+                  "payload": {
+                    "name": "${data.name}",
+                    "email": "${data.email}",
+                    "password": "${data.password}",
+                    "termsAccepted": "${data.termsAccepted}",
+                    "birthDate": "${data.birthDate}",
+                    "gender": "${data.gender}",
+                    "postalCode": "${data.postalCode}",
+                    "financialGoal": "${form.financialGoal}",
+                    "financialKnowledge": "${form.financialKnowledge}",
+                    "marketingConsent": "${form.marketingConsent}",
+                    "phone_number": "${data.phone_number}"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "ACCOUNT_CREATION_SUCCESS",
+      "title": "Bem-vindo(a) ao time! 💜",
+      "terminal": true,
+      "success": true,
+      "data": {
+        "name": {
+          "type": "string",
+          "__example__": "João Silva"
+        },
+        "email": {
+          "type": "string",
+          "__example__": "joao.silva@exemplo.com"
+        },
+        "password": {
+          "type": "string",
+          "__example__": "senha123"
+        },
+        "termsAccepted": {
+          "type": "boolean",
+          "__example__": true
+        },
+        "birthDate": {
+          "type": "string",
+          "__example__": "1990-01-01"
+        },
+        "gender": {
+          "type": "string",
+          "__example__": "Masculino"
+        },
+        "postalCode": {
+          "type": "string",
+          "__example__": "12345-678"
+        },
+        "financialGoal": {
+          "type": "string",
+          "__example__": "SAVE_MONEY"
+        },
+        "financialKnowledge": {
+          "type": "string",
+          "__example__": "BEGINNER"
+        },
+        "marketingConsent": {
+          "type": "boolean",
+          "__example__": true
+        }
+      },
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          {
+            "type": "Form",
+            "name": "account_success_form",
+            "children": [
+              {
+                "type": "TextHeading",
+                "text": "🎉 Uhul! Agora sim vamos fazer seu dinheiro render!"
+              },
+              {
+                "type": "TextBody",
+                "text": "Já deixei tudo prontinho pra você:"
+              },
+              {
+                "type": "TextBody",
+                "text": "✨ Sua Carteira tá no jeito\n💜 Minha IA tá calibrada pro seu perfil\n🎯 Categorias iniciais já configuradas"
+              },
+              {
+                "type": "TextHeading",
+                "text": "Vamo começar com tudo? 🚀"
+              },
+              {
+                "type": "TextBody",
+                "text": "1️⃣ Anota aí sua primeira grana\n2️⃣ Dá uma olhada nas categorias que escolhi pra você\n3️⃣ Bora fazer seu primeiro orçamento juntos\n4️⃣ Me conta qual meta você quer conquistar primeiro"
+              },
+              {
+                "type": "TextHeading",
+                "text": "Conte comigo pra te ajudar! 💪"
+              },
+              {
+                "type": "TextBody",
+                "text": "🧠 Insights que fazem sentido pra você\n💡 Dicas práticas no seu ritmo\n🎯 Acompanhamento de pertinho\n📱 Alertas que realmente importam\n✨ Tudo isso direto no WhatsApp!"
+              },
+              {
+                "type": "TextBody",
+                "text": "Tô super animada pra te ajudar a conquistar seus objetivos! Bora fazer acontecer? 💜"
+              },
+              {
+                "type": "Footer",
+                "label": "Começar Minha Jornada 🚀",
+                "on-click-action": {
+                  "name": "data_exchange",
+                  "payload": {
+                    "name": "${data.name}",
+                    "email": "${data.email}",
+                    "password": "${data.password}",
+                    "termsAccepted": "${data.termsAccepted}",
+                    "birthDate": "${data.birthDate}",
+                    "gender": "${data.gender}",
+                    "postalCode": "${data.postalCode}",
+                    "financialGoal": "${data.financialGoal}",
+                    "financialKnowledge": "${data.financialKnowledge}",
+                    "marketingConsent": "${data.marketingConsent}",
+                    "phone_number": "${data.phone_number}"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

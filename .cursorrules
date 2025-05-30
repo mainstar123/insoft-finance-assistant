@@ -1,0 +1,67 @@
+{
+  "name": "LangGraph Multi-Agent Refactoring & Optimization",
+  "description": "Ensure Cursor intelligently refactors LangGraph using MCP for external research and multi-step reasoning. Follow TypeScript, NestJS, and Clean Architecture best practices while avoiding redundancy and enhancing maintainability.",
+  "global_enforcement": "strict",
+  "rules": [
+    {
+      "name": "Context Awareness & Sequential Thinking",
+      "description": "Before suggesting or applying changes, Cursor must first analyze the local file, related modules, and architectural patterns. Think in clear steps: understand -> evaluate -> suggest -> apply.",
+      "enforcement": "strict"
+    },
+    {
+      "name": "Multi-Context Prompting (MCP) & External Research",
+      "description": "If necessary to complete a task or resolve ambiguity, Cursor should research using GitHub, StackOverflow, and MDN. Prefer official documentation and community best practices. Cite sources in comments if the implementation is non-trivial or adapted.",
+      "enforcement": "recommended"
+    },
+    {
+      "name": "Strict TypeScript Practices",
+      "description": "Code must use TypeScript strict mode. Avoid `any`, `unknown`, or implicit `any`. Prefer `type` for composition and utility types, and `interface` for contracts. Use enums for fixed values. Apply generics and readonly modifiers appropriately.",
+      "enforcement": "strict"
+    },
+    {
+      "name": "Functional Programming Preference",
+      "description": "Prefer pure functions and immutability. Avoid side-effects, shared mutable state, and unnecessary classes. Use composable function factories where applicable.",
+      "enforcement": "recommended"
+    },
+    {
+      "name": "Clean Code & SOLID Principles",
+      "description": "Code must be readable, testable, and follow SRP, OCP, and ISP. Apply early returns, clear naming, short functions, and meaningful abstractions. Remove dead or commented-out code.",
+      "enforcement": "strict"
+    },
+    {
+      "name": "Modular, Non-Redundant Architecture",
+      "description": "Do not create new files or components unless absolutely necessary. Cursor must first verify if similar logic already exists and extend it. Enforce DRY and modularity at every layer.",
+      "enforcement": "strict"
+    },
+    {
+      "name": "LangGraph-Specific Design Patterns",
+      "description": "Respect and reuse existing LangGraph architecture: agent routing, state transitions, memory manager, and orchestration patterns. Follow existing patterns for creating agents, tools, and prompts.",
+      "enforcement": "strict"
+    },
+    {
+      "name": "Error Handling & Resilience",
+      "description": "Use structured error categories and fallback responses. All critical paths must include error logging and recovery strategies. Don't allow uncaught or silent failures.",
+      "enforcement": "recommended"
+    },
+    {
+      "name": "Testing First Mentality",
+      "description": "Before implementing new logic, define unit or integration tests. Favor TDD or at least validate each refactoring with updated tests. Maintain test isolation and avoid hidden dependencies.",
+      "enforcement": "recommended"
+    },
+    {
+      "name": "File Naming & Structural Conventions",
+      "description": "Use kebab-case for file names, camelCase for variables/functions, PascalCase for types/enums/classes, and UPPER_SNAKE_CASE for constants. One component/type/function per file where practical.",
+      "enforcement": "strict"
+    },
+    {
+      "name": "Documentation & Self-Describing Code",
+      "description": "Code should be self-documenting with meaningful names. Add JSDoc for exported functions, classes, and complex logic. Where necessary, briefly explain reasoning behind architectural decisions.",
+      "enforcement": "recommended"
+    },
+    {
+      "name": "Implementation Discipline",
+      "description": "All work must follow this flow: (1) Read existing code, (2) Plan steps, (3) Apply minimal, clean changes, (4) Test assumptions, (5) Commit or generate code. Don't skip planning or testing.",
+      "enforcement": "strict"
+    }
+  ]
+}

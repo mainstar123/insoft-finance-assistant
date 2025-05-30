@@ -1,0 +1,62 @@
+{
+  "name": "@tamy-finance-assistant/root",
+  "private": true,
+  "version": "1.0.0",
+  "description": "",
+  "scripts": {
+    "dev": "turbo run dev",
+    "dev:all": "turbo run dev --parallel",
+    "dev:ai-server": "turbo run dev --filter=ai-assistant-server",
+    "build": "turbo run build",
+    "build:all": "turbo run build --parallel",
+    "build:ai-server": "turbo run build --filter=ai-assistant-server",
+    "test": "turbo run test",
+    "test:all": "turbo run test --parallel",
+    "test:ai-server": "turbo run test --filter=ai-assistant-server",
+    "lint": "turbo run lint",
+    "lint:all": "turbo run lint --parallel",
+    "lint:ai-server": "turbo run lint --filter=ai-assistant-server",
+    "clean": "rm -rf node_modules **/node_modules",
+    "clean:install": "pnpm clean && pnpm install",
+    "prepare": "husky",
+    "lint-staged": "turbo run lint --filter=[HEAD^1]",
+    "commitlint": "commitlint --edit",
+    "format": "prettier --write \"**/*.{ts,tsx,md,json}\""
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@9.14.2",
+  "engines": {
+    "node": ">=22.0.0",
+    "npm": ">=10.0.0",
+    "pnpm": ">=9.14.2"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "pnpm": {
+    "overrides": {
+      "typescript": "^5.7.3",
+      "eslint": "^9.18.0",
+      "prettier": "^3.4.2"
+    }
+  },
+  "devDependencies": {
+    "lerna": "^8.1.9",
+    "turbo": "latest",
+    "husky": "^9.0.11",
+    "@commitlint/cli": "^19.0.3",
+    "@commitlint/config-conventional": "^19.0.3",
+    "lint-staged": "^15.2.2",
+    "prettier": "^3.4.2",
+    "eslint": "^9.18.0",
+    "eslint-config-prettier": "^10.0.1",
+    "eslint-plugin-prettier": "^5.2.3",
+    "@typescript-eslint/parser": "^6.21.0",
+    "@typescript-eslint/eslint-plugin": "^6.21.0",
+    "eslint-plugin-react": "^7.34.0",
+    "eslint-plugin-react-hooks": "^4.6.0",
+    "@types/node": "^20.11.24"
+  }
+}

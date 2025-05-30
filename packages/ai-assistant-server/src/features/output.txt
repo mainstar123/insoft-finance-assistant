@@ -1,0 +1,4929 @@
+// orchestrator-pattern/index.ts
+
+import { UserModule } from '@/features/user/user.module';
+import { Module } from '@nestjs/common';
+import { AgentsModule } from './agents';
+import { WorkflowService } from './graph/workflow';
+import { MemoryModule } from './memory';
+import { OrchestratorChannelService } from './orchestrator-channel.service';
+import { SanitizersModule } from './sanitizers';
+import { ThreadModule } from './thread/thread.module';
+
+@Module({
+  imports: [AgentsModule, SanitizersModule, MemoryModule, UserModule, ThreadModule],
+  providers: [
+    WorkflowService,
+    OrchestratorChannelService,
+  ],
+  exports: [WorkflowService, OrchestratorChannelService],
+})
+export class OrchestratorPatternModule {}
+
+
+// orchestrator-pattern/orchestrator-channel.service.ts
+
+import {
+  Injectable,
+  Logger,
+  OnModuleInit,
+  OnModuleDestroy,
+} from '@nestjs/common';
+import { WorkflowService } from './graph/workflow';
+import { ChannelType } from '@/core/integrations/channels/channel.interface';
+import { UserService } from '@/features/user/user.service';
+import {
+  MessageBrokerService,
+  UserMessage,
+} from '@/core/messaging/message-broker.service';
+import { ThreadManagerService } from './thread/thread-manager.service';
+
+@Injectable()
+export class OrchestratorChannelService
+  implements OnModuleInit, OnModuleDestroy
+{
+  private readonly logger = new Logger(OrchestratorChannelService.name);
+  private unsubscribeCallback: (() => void) | null = null;
+
+  constructor(
+    private readonly workflowService: WorkflowService,
+    private readonly messageBroker: MessageBrokerService,
+    private readonly userService: UserService,
+    private readonly threadManager: ThreadManagerService,
+  ) {}
+
+  onModuleInit() {
+    this.logger.log('Initializing Orchestrator Channel Service');
+    // Subscribe to message broker for user messages
+    this.unsubscribeCallback = this.messageBroker.onUserMessage(
+      this.handleUserMessage.bind(this),
+    );
+    this.logger.log('Orchestrator Channel Service initialized');
+  }
+
+  onModuleDestroy() {
+    if (this.unsubscribeCallback) {
+      this.unsubscribeCallback();
+    }
+  }
+
+  private validateInput(input: string): void {
+    if (!input?.trim()) {
+      throw new Error('Input is required and cannot be empty');
+    }
+  }
+
+  async handleUserMessage(message: UserMessage): Promise<void> {
+    try {
+      // Validate message content
+      this.validateInput(message.content);
+
+      // Validate channel type
+      const channelType = message.channelId as ChannelType;
+      if (!Object.values(ChannelType).includes(channelType)) {
+        throw new Error(`Invalid channel type: ${message.channelId}`);
+      }
+
+      this.logger.debug('Processing user message with orchestrator pattern', {
+        userPhone: message.userPhone,
+        channelId: channelType,
+        content:
+          message.content?.length > 50
+            ? `${message.content.substring(0, 50)}...`
+            : message.content,
+        attachments: message.attachments?.length ?? 0,
+      });
+
+      // Get or create thread ID
+      let threadId: string;
+      threadId = await this.threadManager.getOrCreateThreadId(
+        message.userPhone,
+        channelType,
+      );
+
+      // Check if user is registered
+      const user = await this.userService.findByPhoneNumber(message.userPhone);
+      let isRegistered = false;
+
+      if (user) {
+        // User exists in the database, check if registration is complete
+        const userRegStatus = await this.userService.validateRegistration(
+          user.id,
+        );
+        isRegistered = userRegStatus.isComplete;
+
+        this.logger.debug('User registration status checked', {
+          userId: user.id,
+          isRegistered,
+          missingSteps: userRegStatus.isComplete
+            ? []
+            : userRegStatus.missingSteps,
+        });
+      } else {
+        // No user record yet
+        this.logger.debug('No user record found for phone number', {
+          userPhone: message.userPhone,
+        });
+      }
+
+      // Get the stored conversation state
+      try {
+        const state = await this.workflowService.getThreadState(threadId);
+        console.log("🚀 ~ handleUserMessage ~ state:", state)
+
+        // Check if we have too many messages and need to reset the thread
+        if (state && state.messages && state.messages.length > 30) {
+          this.logger.warn(
+            `Thread has ${state.messages.length} messages, checking if reset is needed`,
+          );
+
+          // If message count exceeds threshold, create a new thread
+          // Reset happens by generating a completely new thread ID
+          if (state.messages.length > 30) {
+            const newThreadId = `${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
+            await this.threadManager.set(
+              `thread:${message.userPhone}:${channelType}`,
+              newThreadId,
+            );
+
+            this.logger.log(
+              `Thread was reset due to message overflow. Old ID: ${threadId}, New ID: ${newThreadId}`,
+            );
+            threadId = newThreadId;
+          }
+        }
+      } catch (err) {
+        // It's okay if we can't get the state, we'll just continue with the current thread
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        this.logger.debug(`Couldn't retrieve thread state: ${errorMessage}`);
+      }
+      console.log('🚀 ~ handleUserMessage ~ threadId:', threadId);
+
+      // Process message with our orchestrator pattern workflow
+      const events = await this.workflowService.processMessage(
+        message.userPhone,
+        threadId,
+        message.content,
+        isRegistered,
+      );
+      console.log("🚀 ~ handleUserMessage ~ events:", events)
+
+      this.logger.debug('Message processing completed', {
+        userPhone: message.userPhone,
+        threadId,
+        eventsLength: events.length,
+      });
+
+      // Extract response from events
+      const response = this.extractResponseFromEvents(events);
+      console.log("🚀 ~ handleUserMessage ~ response:", response)
+
+      // Send response back through message broker
+      if (response) {
+        this.messageBroker.publishAiResponse({
+          userPhone: message.userPhone,
+          content: response,
+          channelId: message.channelId,
+          attachments: [], // Empty attachments for now
+        });
+
+        this.logger.debug('Published AI response', {
+          userPhone: message.userPhone,
+          channelId: channelType,
+          responseLength: response.length,
+        });
+      }
+    } catch (error) {
+      console.log("🚀 ~ handleUserMessage ~ error:", error)
+      this.logger.error(
+        `Error handling user message: ${error instanceof Error ? error.message : String(error)}`,
+        error instanceof Error ? error.stack : undefined,
+      );
+
+      // Determine language for error message (simple approach)
+      const content = message?.content || '';
+      const isPortuguese = this.seemsPortuguese(content);
+
+      // Send more user-friendly fallback message in case of error
+      this.messageBroker.publishAiResponse({
+        userPhone: message.userPhone,
+        content: isPortuguese
+          ? 'Desculpe, encontrei um problema temporário. Por favor, tente novamente em alguns minutos ou envie uma mensagem diferente.'
+          : 'I apologize, but I encountered a temporary issue. Please try again in a few minutes or send a different message.',
+        channelId: message.channelId,
+        attachments: [],
+      });
+    }
+  }
+
+  /**
+   * Simple heuristic to detect if a message is likely in Portuguese
+   */
+  private seemsPortuguese(text: string): boolean {
+    if (!text) return false;
+
+    const normalized = text.toLowerCase();
+
+    // Check for Portuguese-specific words
+    const ptWords = [
+      'olá',
+      'oi',
+      'bom dia',
+      'boa tarde',
+      'boa noite',
+      'como vai',
+      'obrigado',
+      'obrigada',
+      'por favor',
+      'sim',
+      'não',
+      'ajuda',
+    ];
+
+    if (ptWords.some((word) => normalized.includes(word))) {
+      return true;
+    }
+
+    // Check for Portuguese-specific characters
+    const ptCharacters = [
+      'ç',
+      'ã',
+      'õ',
+      'á',
+      'é',
+      'í',
+      'ó',
+      'ú',
+      'â',
+      'ê',
+      'ô',
+    ];
+
+    return ptCharacters.some((char) => normalized.includes(char));
+  }
+
+  private extractResponseFromEvents(events: any[]): string {
+    try {
+      // Output debug info for troubleshooting
+      this.logger.debug(`Extracting response from ${events.length} events`);
+
+      // First check output_sanitizer which should have the final response
+      for (const event of events) {
+        // Check output_sanitizer messages first (this should contain the final response)
+        if (event.output_sanitizer?.messages) {
+          const messages = event.output_sanitizer.messages;
+          if (Array.isArray(messages) && messages.length > 1) {
+            // The second message in the array is typically the AI response
+            const aiMessage = messages[1]; // AIMessage is usually the second message
+
+            // Check if this is an AIMessage with content
+            if (aiMessage && typeof aiMessage.content === 'string') {
+              return aiMessage.content;
+            }
+          }
+        }
+
+        // Check worker messages if output_sanitizer didn't have a valid response
+        if (
+          event.registration_worker?.messages ||
+          event.financial_coach_worker?.messages ||
+          event.general_assistant_worker?.messages
+        ) {
+          // Handle registration worker messages
+          if (event.registration_worker?.messages) {
+            const messages = event.registration_worker.messages;
+            if (Array.isArray(messages) && messages.length > 1) {
+              // The second message in the array is typically the AI response
+              const aiMessage = messages[1];
+              if (aiMessage && typeof aiMessage.content === 'string') {
+                return aiMessage.content;
+              }
+            }
+          }
+
+          // Handle financial coach worker messages
+          if (event.financial_coach_worker?.messages) {
+            const messages = event.financial_coach_worker.messages;
+            if (Array.isArray(messages) && messages.length > 1) {
+              // The second message in the array is typically the AI response
+              const aiMessage = messages[1];
+              if (aiMessage && typeof aiMessage.content === 'string') {
+                return aiMessage.content;
+              }
+            }
+          }
+
+          // Handle general assistant worker messages
+          if (event.general_assistant_worker?.messages) {
+            const messages = event.general_assistant_worker.messages;
+            if (Array.isArray(messages) && messages.length > 1) {
+              // The second message in the array is typically the AI response
+              const aiMessage = messages[1];
+              if (aiMessage && typeof aiMessage.content === 'string') {
+                return aiMessage.content;
+              }
+            }
+          }
+        }
+
+        // Check for interrupts which contain responses
+        if (event.__interrupt__) {
+          const interruptValue = event.__interrupt__[0]?.value;
+          if (interruptValue && typeof interruptValue === 'string') {
+            return interruptValue;
+          }
+          if (interruptValue && typeof interruptValue.message === 'string') {
+            return interruptValue.message;
+          }
+        }
+      }
+
+      // Default response if nothing else found - detect language from events if possible
+      const lastMessage = this.tryExtractLastUserMessage(events);
+      const isPortuguese = this.seemsPortuguese(lastMessage);
+
+      return isPortuguese
+        ? 'Olá! Estou aqui para ajudar com suas questões financeiras. Como posso auxiliar você hoje?'
+        : "Hello! I'm here to help with your financial questions. How can I assist you today?";
+    } catch (error) {
+      this.logger.error(
+        `Error extracting response from events: ${error instanceof Error ? error.message : String(error)}`,
+        error instanceof Error ? error.stack : undefined,
+      );
+      return 'Desculpe, ocorreu um erro. Como posso ajudar você com suas finanças hoje?';
+    }
+  }
+
+  /**
+   * Try to extract the last user message to help with language detection
+   */
+  private tryExtractLastUserMessage(events: any[]): string {
+    for (const event of events) {
+      // Try each possible message container
+      const messageContainers = [
+        event.messages,
+        event.output_sanitizer?.messages,
+        event.registration_worker?.messages,
+        event.financial_coach_worker?.messages,
+        event.general_assistant_worker?.messages,
+      ];
+
+      for (const container of messageContainers) {
+        if (Array.isArray(container)) {
+          // Look for the last human message
+          for (let i = container.length - 1; i >= 0; i--) {
+            const msg = container[i];
+            if (!msg) continue;
+
+            const isHumanMessage =
+              (msg._getType &&
+                typeof msg._getType === 'function' &&
+                msg._getType() === 'human') ||
+              (msg.role && msg.role === 'user');
+
+            if (isHumanMessage && typeof msg.content === 'string') {
+              return msg.content;
+            }
+          }
+        }
+      }
+    }
+
+    return '';
+  }
+}
+
+
+// orchestrator-pattern/UNREGISTERED_USER_QA.md
+
+# Cenários de Teste QA para Usuários Não Registrados
+
+## 1. Conversa Inicial (Sem Registro)
+| ID do Teste | Mensagem | Comportamento Esperado | Observações |
+|-------------|----------|----------------------|--------------|
+| 1.1 | "Olá" | Encaminha para general_assistant_worker | Saudação simples não deve acionar registro |
+| 1.2 | "Oi Tamy" | Encaminha para general_assistant_worker | Saudação com nome não deve acionar registro |
+| 1.3 | "Olá, tudo bem?" | Encaminha para general_assistant_worker | Saudação em português deve ser tratada apropriadamente |
+| 1.4 | "O que é um fundo mútuo?" | Encaminha para financial_coach_worker | Pergunta financeira deve ir para o coach financeiro |
+| 1.5 | "Como economizar dinheiro?" | Encaminha para financial_coach_worker | Pergunta financeira em português |
+| 1.6 | "Me conta uma piada" | Encaminha para general_assistant_worker | Conversa casual deve ficar no assistente geral |
+| 1.7 | "Como está o tempo hoje?" | Encaminha para general_assistant_worker | Pergunta não financeira |
+
+## 2. Solicitações Explícitas de Registro
+| ID do Teste | Mensagem | Comportamento Esperado | Observações |
+|-------------|----------|----------------------|--------------|
+| 2.1 | "Quero criar uma conta" | Encaminha para registration_worker | Solicitação explícita de registro em português |
+| 2.2 | "Como faço para me registrar?" | Encaminha para registration_worker | Pergunta sobre processo de registro |
+| 2.3 | "Quero me cadastrar" | Encaminha para registration_worker | Registro explícito em português |
+| 2.4 | "Me cadastra por favor" | Encaminha para registration_worker | Fraseologia alternativa de registro |
+| 2.5 | "Posso entrar na Tamy?" | Encaminha para registration_worker | Solicitação indireta de registro |
+| 2.6 | "Gostaria de criar uma conta" | Encaminha para registration_worker | Solicitação educada de registro em português |
+| 2.7 | "Preciso de uma conta para acompanhar minhas finanças" | Encaminha para registration_worker | Registro com contexto |
+
+## 3. Respostas do Fluxo de Registro
+| ID do Teste | Contexto | Mensagem | Comportamento Esperado | Observações |
+|-------------|----------|----------|----------------------|--------------|
+| 3.1 | Após início do registro (coleta_nome) | "João Silva" | Continua em registration_worker, move para etapa de email | Entrada de nome válido |
+| 3.2 | Após início do registro (coleta_nome) | "J" | Permanece em registration_worker, solicita nome válido | Tratamento de nome inválido |
+| 3.3 | Etapa de coleta de email | "joao@exemplo.com" | Continua em registration_worker | Email válido |
+| 3.4 | Etapa de coleta de email | "não é um email" | Permanece em registration_worker, solicita email válido | Tratamento de email inválido |
+| 3.5 | Etapa de confirmação | "Sim, está correto" | Completa fluxo de registro | Confirmação positiva |
+| 3.6 | Etapa de confirmação | "Não, meu email está errado" | Retorna à coleta de email | Tratamento de correção |
+
+## 4. Tentativas de Sair do Registro
+| ID do Teste | Contexto | Mensagem | Comportamento Esperado | Observações |
+|-------------|----------|----------|----------------------|--------------|
+| 4.1 | Durante coleta de nome | "Na verdade, não quero me registrar agora" | LLM deve reconhecer intenção de saída, encaminhar para general_assistant | Solicitação explícita de saída |
+| 4.2 | Durante coleta de email | "Cancelar cadastro" | LLM deve reconhecer intenção de saída, encaminhar para general_assistant | Cancelamento direto |
+| 4.3 | Durante coleta de email | "Como está o tempo hoje?" | Deve permanecer em registration_worker a menos que LLM identifique forte mudança de tópico | Tentativa implícita de saída |
+| 4.4 | Durante coleta de email | "Quero parar o cadastro" | LLM deve reconhecer intenção de saída em português | Saída em português |
+| 4.5 | Durante coleta de email | "Parar" | LLM deve reconhecer intenção mínima de saída | Saída com palavra única |
+| 4.6 | Durante confirmação | "Na verdade quero falar sobre investimentos" | LLM deve reconhecer saída com novo tópico | Saída com mudança de tópico |
+
+## 5. Cenários Mistos
+| ID do Teste | Contexto | Mensagem | Comportamento Esperado | Observações |
+|-------------|----------|----------|----------------------|--------------|
+| 5.1 | Após discussão sobre finanças | "Agora quero me registrar" | Deve transicionar para registration_worker | Mudança de contexto para registro |
+| 5.2 | Durante conversa geral | "Como salvo meus dados financeiros aqui?" | Pode acionar explicação sobre registro | Consulta indireta sobre registro |
+| 5.3 | Após tentativa falha de registro | "Vamos tentar registrar novamente" | Deve reiniciar fluxo de registro | Tentativa de registro novamente |
+| 5.4 | Após saída do registro | "Quais serviços financeiros vocês oferecem?" | Deve ir para financial_coach_worker | Pergunta financeira após saída |
+| 5.5 | Primeira mensagem, pergunta longa | "Estou tentando economizar para aposentadoria mas não sei por onde começar. Tenho 35 anos e cerca de R$50 mil guardados até agora. O que devo fazer?" | Deve encaminhar para financial_coach_worker não para registro | Consulta financeira complexa |
+| 5.6 | Múltiplas perguntas | "Olá! Pode me ajudar a entender ETFs? Ah, e como faço para me cadastrar?" | Provavelmente encaminha para registration_worker já que contém intenção de registro | Detecção de intenção mista |
+
+## 6. Casos de Borda
+| ID do Teste | Contexto | Mensagem | Comportamento Esperado | Observações |
+|-------------|----------|----------|----------------------|--------------|
+| 6.1 | Usuário novo | "?" | Encaminha para general_assistant_worker | Tratamento de entrada mínima |
+| 6.2 | Usuário novo | "123456" | Encaminha para general_assistant_worker | Entrada apenas numérica |
+| 6.3 | Usuário novo | "..." | Encaminha para general_assistant_worker | Entrada apenas com pontuação |
+| 6.4 | Usuário novo | "cadastro registro conta inscrever" | LLM deve detectar intenção de registro mesmo sendo apenas palavras-chave | Palavras-chave sem gramática |
+| 6.5 | Durante etapa de email | "este é meu email: usuario@exemplo.com e meu telefone é 555-1234" | Deve extrair email e continuar registro | Compartilhamento excessivo de informação |
+| 6.6 | Usuário novo | História muito longa sobre finanças pessoais (300+ palavras) | Deve analisar conteúdo e encaminhar apropriadamente | Tratamento de mensagem longa |
+
+## 7. Testes de Conversas Multi-turnos
+| Sequência de Teste | Mensagens | Comportamento Esperado | Observações |
+|-------------------|-----------|----------------------|--------------|
+| 7.1 | 1. "Olá"<br>2. "O que é a Tamy?"<br>3. "Como faço para me cadastrar?" | 1-2. general_assistant_worker<br>3. registration_worker | Progressão natural para registro |
+| 7.2 | 1. "Quero me registrar"<br>2. "João Silva"<br>3. "Na verdade, cancela"<br>4. "Me fala sobre investimentos" | 1-2. registration_worker<br>3. Saída detectada<br>4. financial_coach_worker | Início de registro, depois cancela |
+| 7.3 | 1. "Olá"<br>2. "Qual é uma boa taxa de poupança?"<br>3. "Posso acompanhar minhas economias aqui?"<br>4. "Sim, quero me cadastrar" | 1. general_assistant_worker<br>2. financial_coach_worker<br>3. Provavelmente financial_coach_worker<br>4. registration_worker | Progressão natural através de diferentes workers |
+
+
+// orchestrator-pattern/agents/error-handler.ts
+
+import { Injectable, Logger } from '@nestjs/common';
+import { OrchestratorState, ORCHESTRATOR, ERROR_HANDLER } from '../types';
+import { AIMessage } from '@langchain/core/messages';
+import { ChatOpenAI } from '@langchain/openai';
+
+@Injectable()
+export class ErrorHandlerService {
+  private readonly logger = new Logger(ErrorHandlerService.name);
+
+  async handleError(state: OrchestratorState): Promise<OrchestratorState> {
+    try {
+      this.logger.debug('Handling error', {
+        userId: state.userId,
+        threadId: state.threadId,
+        error: state.metadata.lastError,
+        fromNode: state.metadata.lastNode,
+      });
+
+      // Create appropriate error message with language awareness
+      let errorMessage =
+        'I apologize, but there was an unexpected issue. Let me try to help you differently.';
+
+      // If we know the user's language preference, use it to choose error messages
+      if (state.memoryContext?.preferredLanguage) {
+        const languageCode = state.memoryContext.preferredLanguage.code;
+
+        // Let the LLM generate an appropriate error message in the user's language
+        const prompt = `Generate a polite, brief error message in language code: ${languageCode}. The error type is: ${state.metadata.lastError || 'unknown error'}.`;
+
+        try {
+          const errorResponseModel = new ChatOpenAI({
+            modelName: 'gpt-3.5-turbo',
+            temperature: 0.2,
+          });
+
+          const response = await errorResponseModel.invoke(prompt);
+          errorMessage =
+            typeof response.content === 'string'
+              ? response.content
+              : errorMessage;
+        } catch (error) {
+          // Fall back to default message
+          this.logger.warn('Error generating localized error message', error);
+        }
+      }
+
+      // Add error message to the conversation
+      const updatedState = {
+        ...state,
+        messages: [
+          ...state.messages,
+          new AIMessage({
+            content: errorMessage,
+            name: 'ErrorHandler',
+          }),
+        ],
+        metadata: {
+          ...state.metadata,
+          lastNode: ERROR_HANDLER,
+          lastError: undefined, // Clear the error after handling
+        },
+        next: ORCHESTRATOR, // Return to orchestrator for next steps
+      };
+
+      return updatedState;
+    } catch (error) {
+      // If there's an error in the error handler, log it but don't create an infinite loop
+      this.logger.error('Error in error handler', error);
+
+      // Create a safe fallback state
+      return {
+        ...state,
+        messages: [
+          ...state.messages,
+          new AIMessage({
+            content:
+              'I apologize, but I encountered an unexpected issue. Please try again later.',
+            name: 'ErrorHandler',
+          }),
+        ],
+        metadata: {
+          ...state.metadata,
+          lastNode: ERROR_HANDLER,
+        },
+        next: ORCHESTRATOR,
+      };
+    }
+  }
+}
+
+
+// orchestrator-pattern/agents/index.ts
+
+import { Module } from '@nestjs/common';
+import { OrchestratorAgent } from './orchestrator.agent';
+import { RegistrationWorker } from './registration.agent';
+import { FinancialCoachWorker } from './financial-coach.agent';
+import { GeneralAssistantWorker } from './general-assistant.agent';
+import { ErrorHandlerService } from './error-handler';
+import { ToolsModule } from '../tools';
+
+@Module({
+  imports: [ToolsModule],
+  providers: [
+    OrchestratorAgent,
+    RegistrationWorker,
+    FinancialCoachWorker,
+    GeneralAssistantWorker,
+    ErrorHandlerService,
+  ],
+  exports: [
+    OrchestratorAgent,
+    RegistrationWorker,
+    FinancialCoachWorker,
+    GeneralAssistantWorker,
+    ErrorHandlerService,
+  ],
+})
+export class AgentsModule {}
+
+export * from './orchestrator.agent';
+export * from './registration.agent';
+export * from './financial-coach.agent';
+export * from './general-assistant.agent';
+export * from './error-handler';
+
+
+// orchestrator-pattern/agents/orchestrator.agent.ts
+
+import { RunnableConfig } from '@langchain/core/runnables';
+import { END } from '@langchain/langgraph';
+import { createReactAgent } from '@langchain/langgraph/prebuilt';
+import { ChatOpenAI } from '@langchain/openai';
+import { Injectable, Logger } from '@nestjs/common';
+import { z } from 'zod';
+import {
+  ERROR_HANDLER,
+  FINANCIAL_COACH_WORKER,
+  GENERAL_ASSISTANT_WORKER,
+  OrchestratorState,
+  ProcessType,
+  REGISTRATION_WORKER,
+  RegistrationSteps,
+} from '../types';
+import { Command, interrupt } from '@langchain/langgraph';
+import { BaseMessage } from '@langchain/core/messages';
+
+// Define the routing schema using Zod
+const RoutingSchema = z.object({
+  routeTo: z.enum([
+    REGISTRATION_WORKER,
+    FINANCIAL_COACH_WORKER,
+    GENERAL_ASSISTANT_WORKER,
+    ERROR_HANDLER,
+    END,
+  ]),
+  reasoning: z
+    .string()
+    .describe('Detailed explanation for the routing decision'),
+  shouldMaintainProcess: z
+    .boolean()
+    .describe('Whether to maintain the current process')
+    .default(true),
+});
+
+// Define the TypeScript type that matches the schema
+type RoutingDecision = {
+  routeTo: string;
+  reasoning: string;
+  shouldMaintainProcess: boolean;
+};
+
+@Injectable()
+export class OrchestratorAgent {
+  private readonly logger = new Logger(OrchestratorAgent.name);
+  private reactAgentModel: ChatOpenAI;
+
+  constructor() {
+    // Initialize the model for the React agent with consistent settings
+    this.reactAgentModel = new ChatOpenAI({
+      modelName: 'gpt-3.5-turbo',
+      temperature: 0,
+    });
+  }
+
+  /**
+   * Checks if we should return to an interrupted process instead of
+   * following the normal orchestration logic
+   */
+  private shouldReturnToInterruptedProcess(state: OrchestratorState): boolean {
+    // No memory context or no interrupted process - nothing to return to
+    if (!state.memoryContext?.interruptedProcess) {
+      // If there's a current process, we should check the context to see if we're continuing it
+      if (state.memoryContext?.currentProcess && state.messages.length > 0) {
+        return this.isLikelyContinuingCurrentProcess(state);
+      }
+      return false;
+    }
+
+    // If we just came from a temporary diversion, we should return to the process
+    if (state.metadata.temporaryDiversion) {
+      return true;
+    }
+
+    // For future: add more conditions to determine when to return to the process
+    return false;
+  }
+
+  /**
+   * Determine if a message is likely to be continuing
+   * the current process rather than starting a new topic
+   */
+  private isLikelyContinuingCurrentProcess(state: OrchestratorState): boolean {
+    // No memory context or no current process - nothing to continue
+    if (!state.memoryContext?.currentProcess || !state.messages.length) {
+      return false;
+    }
+
+    const lastMessage = state.messages[state.messages.length - 1];
+    const currentProcess = state.memoryContext.currentProcess;
+    const currentStep = state.memoryContext.currentStep;
+
+    if (!lastMessage || typeof lastMessage.content !== 'string') {
+      return false;
+    }
+
+    const content = lastMessage.content.trim().toLowerCase();
+
+    // Check for explicit exit indicators
+    const exitIndicators = [
+      'cancel',
+      'stop',
+      'quit',
+      'exit',
+      'leave',
+      'não quero',
+      'not interested',
+      'change topic',
+      'different',
+      'something else',
+      'forget',
+      'new topic',
+      'change subject',
+      'different question',
+    ];
+
+    if (
+      exitIndicators.some((indicator) =>
+        content.includes(indicator.toLowerCase()),
+      )
+    ) {
+      return false;
+    }
+
+    // Special case for registration process - use intelligent context retention
+    if (currentProcess === ProcessType.REGISTRATION) {
+      // If we're in a known registration step, especially name/email collection
+      if (
+        currentStep === RegistrationSteps.COLLECT_NAME ||
+        currentStep === RegistrationSteps.COLLECT_EMAIL ||
+        currentStep === RegistrationSteps.CONFIRM
+      ) {
+        // For name collection, check if it looks like a name response
+        if (currentStep === RegistrationSteps.COLLECT_NAME) {
+          const words = content.split(/\s+/);
+          const hasSpecialChars = /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]+/.test(
+            content,
+          );
+          const isQuestion = content.includes('?');
+          const isReasonableLength =
+            content.length >= 2 && content.length <= 100;
+          const hasReasonableWordCount = words.length >= 1 && words.length <= 5;
+
+          const isLikelyName =
+            isReasonableLength &&
+            hasReasonableWordCount &&
+            !hasSpecialChars &&
+            !isQuestion;
+
+          if (isLikelyName) {
+            this.logger.debug('Message appears to be a name response', {
+              currentStep,
+              messageLength: content.length,
+              wordCount: words.length,
+            });
+            return true;
+          }
+        }
+
+        // For email collection, check if it looks like an email
+        if (currentStep === RegistrationSteps.COLLECT_EMAIL) {
+          const isLikelyEmail = content.includes('@') && content.includes('.');
+          if (isLikelyEmail) {
+            this.logger.debug('Message appears to be an email response');
+            return true;
+          }
+        }
+
+        // For confirmation, any non-topic-changing response should continue
+        if (currentStep === RegistrationSteps.CONFIRM) {
+          this.logger.debug('Continuing confirmation step');
+          return true;
+        }
+      }
+
+      // For any other registration step, maintain context unless explicitly changing topic
+      this.logger.debug('In registration process, maintaining context');
+      return true;
+    }
+
+    // Very basic heuristic: If the message is very short (1-3 words),
+    // it's likely a continuation rather than a topic change
+    const wordCount = content.split(/\s+/).length;
+    if (wordCount <= 3) {
+      return true;
+    }
+
+    return false;
+  }
+
+  async createOrchestratorAgent(llm: ChatOpenAI, state: OrchestratorState) {
+    // Extract contextual information from state
+    const currentProcess = state.memoryContext?.currentProcess || '';
+    const currentStep = state.memoryContext?.currentStep || '';
+    const lastInteraction = state.memoryContext?.lastInteraction || '';
+    const registrationState = state.memoryContext?.registrationState
+      ? JSON.stringify(state.memoryContext.registrationState)
+      : '';
+    const isRegistered = state.isRegistered;
+
+    // Extract the recent message history for better context
+    const recentMessages =
+      state.messages.length > 0
+        ? state.messages
+            .slice(-3)
+            .map((m) => {
+              const isAiMessage =
+                m.constructor.name === 'AIMessage' ||
+                ('_getType' in m && m._getType() === 'ai');
+              return `${isAiMessage ? 'Assistant' : 'User'}: ${m.content}`;
+            })
+            .join('\\n')
+        : '';
+
+    const memoryContext = `
+Current process: ${currentProcess}
+Current step: ${currentStep}
+Last interaction: ${lastInteraction}
+Registration state: ${registrationState}
+Is user registered: ${isRegistered ? 'Yes' : 'No'}
+Recent messages:
+${recentMessages}
+Recent conversation history: ${state.memoryContext?.relevantHistory || ''}
+`;
+
+    // Add language context
+    const languageContext = state.memoryContext?.preferredLanguage
+      ? `User is communicating in ${state.memoryContext.preferredLanguage.name} (${state.memoryContext.preferredLanguage.code}).`
+      : '';
+
+    const basePrompt = `You are an orchestrator agent responsible for coordinating user interactions in the Tamy Finance Assistant. Your role is to analyze user messages and route them to the appropriate specialized worker while maintaining conversation coherence and process continuity.
+
+${languageContext}
+
+PROCESS CONTINUITY RULES (HIGHEST PRIORITY):
+1. ACTIVE PROCESS CONTINUITY:
+   - If there is an ACTIVE PROCESS, you MUST continue routing to the same worker
+   - Only break process continuity if user EXPLICITLY requests to exit/stop/cancel
+   - Treat short responses and expected inputs as part of the current process
+
+2. REGISTRATION PROCESS RULES:
+   - During REGISTRATION (currentProcess = 'REGISTRATION'):
+     * ALWAYS route to registration_worker
+     * ANY name, email, or personal info is PART OF registration
+     * Short responses are likely registration answers
+     * Only exit if user explicitly asks to stop
+   - For new users mentioning registration/signup:
+     * Route to registration_worker
+     * Set shouldMaintainProcess = true
+
+3. PROCESS PRIORITY HIERARCHY:
+   1. HIGHEST: Active process continuation (especially registration)
+   2. HIGH: Explicit registration requests
+   3. MEDIUM: Financial questions (to financial_coach_worker)
+   4. LOW: General queries (to general_assistant_worker)
+
+4. CONTEXT AWARENESS:
+   - Consider message length (short responses likely continue current process)
+   - Check for explicit exit/change topic indicators
+   - Validate if input matches expected format for current step
+
+ROUTING RULES:
+1. registration_worker:
+   - For active registration process
+   - When user explicitly asks to register/signup
+   - NEVER force registration on users
+2. financial_coach_worker:
+   - For financial education/advice
+   - Personal finance questions
+   - Financial concept explanations
+3. general_assistant_worker:
+   - General chat/questions
+   - Default for unclear intent
+   - When user explicitly exits other processes
+
+Current process: ${currentProcess}
+Current step: ${currentStep}
+User is registered: ${isRegistered ? 'Yes' : 'No'}
+`;
+
+    // Add memory context if available
+    const fullPrompt = `${basePrompt}\\n\\nRelevant context from previous interactions:\\n${memoryContext}`;
+
+    // Create ReAct agent with structured output
+    return createReactAgent({
+      llm,
+      tools: [],
+      prompt: fullPrompt,
+      responseFormat: {
+        schema: RoutingSchema,
+        prompt:
+          "Analyze the conversation and decide which agent should handle it next. CRITICAL: If there's an active process (especially REGISTRATION), you MUST continue routing to the same worker unless the user explicitly requests to stop. For registration, treat any name/email responses as part of the registration flow. Set shouldMaintainProcess=false ONLY if user explicitly requests to exit the current process.",
+      },
+    });
+  }
+
+  /**
+   * Helper method to get the appropriate worker for a process type
+   */
+  private getWorkerForProcessType(
+    processType: ProcessType | undefined,
+  ): string {
+    if (!processType) {
+      return GENERAL_ASSISTANT_WORKER;
+    }
+
+    switch (processType) {
+      case ProcessType.REGISTRATION:
+        return REGISTRATION_WORKER;
+      case ProcessType.FINANCIAL_EDUCATION:
+        return FINANCIAL_COACH_WORKER;
+      case ProcessType.GENERAL_ASSISTANT:
+        return GENERAL_ASSISTANT_WORKER;
+      default:
+        return GENERAL_ASSISTANT_WORKER;
+    }
+  }
+
+  /**
+   * Helper method to check if a process type is registration
+   */
+  private isRegistrationProcess(processType: ProcessType | undefined): boolean {
+    return processType === ProcessType.REGISTRATION;
+  }
+
+  async orchestrate(
+    state: OrchestratorState,
+  ): Promise<RoutingDecision | Command | OrchestratorState> {
+    try {
+      this.logger.debug('Orchestrating message routing', {
+        currentProcess: state.metadata?.currentProcess,
+        registrationStep: state.metadata?.registrationStep,
+      });
+
+      // RULE 1: Check for active registration process
+      if (this.isRegistrationProcess(state.memoryContext?.currentProcess)) {
+        const result = await this.enforceProcessContinuity(state);
+
+        // If this is a Command (like an interrupt), return it directly
+        if ('type' in result) {
+          return result;
+        }
+
+        // Force routing to registration worker for active registration
+        state.next = REGISTRATION_WORKER;
+        state.metadata.routingReason =
+          'Maintaining active registration process';
+        state.metadata.shouldMaintainProcess = true;
+        return state;
+      }
+
+      // RULE 2: Check for interrupted process that needs resuming
+      if (
+        state.memoryContext?.interruptedProcess &&
+        state.metadata?.temporaryDiversion
+      ) {
+        const interruptedProcess = state.memoryContext.interruptedProcess;
+        state.next = this.getWorkerForProcessType(interruptedProcess.type);
+        state.metadata.routingReason = `Resuming interrupted ${interruptedProcess.type} process`;
+        state.metadata.shouldMaintainProcess = true;
+        return state;
+      }
+
+      // RULE 3: Use ReactAgent for intelligent routing
+      const routingDecision = await this.analyzeWithReactAgent(state);
+
+      // RULE 4: Override routing if necessary to maintain process continuity
+      if (this.isRegistrationProcess(state.memoryContext?.currentProcess)) {
+        state.next = REGISTRATION_WORKER;
+        state.metadata.routingReason =
+          'Enforcing registration process continuity';
+        state.metadata.shouldMaintainProcess = true;
+        return state;
+      }
+
+      // Set the next destination and metadata
+      state.next = routingDecision.routeTo;
+      state.metadata.routingReason = routingDecision.reasoning;
+      state.metadata.shouldMaintainProcess =
+        routingDecision.shouldMaintainProcess;
+
+      return state;
+    } catch (error) {
+      this.logger.error('Error in orchestration', error);
+      state.next = ERROR_HANDLER;
+      state.metadata.routingReason = 'Error occurred during orchestration';
+      state.metadata.shouldMaintainProcess = false;
+      return state;
+    }
+  }
+
+  private async enforceProcessContinuity(
+    state: OrchestratorState,
+  ): Promise<RoutingDecision | Command> {
+    try {
+      // Check for explicit exit indicators
+      if (await this.hasExplicitExitIndicator(state)) {
+        return interrupt({
+          resume: 'Would you like to exit the current process?',
+          metadata: {
+            interruptType: 'process_exit',
+            currentProcess: state.memoryContext?.currentProcess,
+          },
+        });
+      }
+
+      // Special handling for registration process
+      if (this.isRegistrationProcess(state.memoryContext?.currentProcess)) {
+        // Check for name validation
+        if (await this.needsNameValidation(state)) {
+          return interrupt({
+            resume: 'Please confirm your name:',
+            metadata: {
+              interruptType: 'name_validation',
+            },
+          });
+        }
+
+        // Check for email validation
+        if (await this.needsEmailValidation(state)) {
+          return interrupt({
+            resume: 'Please confirm your email address:',
+            metadata: {
+              interruptType: 'email_validation',
+            },
+          });
+        }
+
+        // Continue registration process
+        return {
+          routeTo: REGISTRATION_WORKER,
+          reasoning: 'Continuing active registration process',
+          shouldMaintainProcess: true,
+        };
+      }
+
+      // Default routing decision based on current process
+      return {
+        routeTo: this.getWorkerForProcessType(
+          state.memoryContext?.currentProcess,
+        ),
+        reasoning: 'Continuing current process',
+        shouldMaintainProcess: true,
+      };
+    } catch (error) {
+      this.logger.error('Error in process continuity check', error);
+      return {
+        routeTo: ERROR_HANDLER,
+        reasoning: 'Error occurred during process continuity check',
+        shouldMaintainProcess: false,
+      };
+    }
+  }
+
+  private async hasExplicitExitIndicator(
+    state: OrchestratorState,
+  ): Promise<boolean> {
+    const lastMessage = state.metadata?.lastMessage?.toLowerCase() || '';
+    const exitIndicators = [
+      'exit',
+      'quit',
+      'cancel',
+      'stop',
+      'leave',
+      'não quero',
+      'not interested',
+      'change topic',
+      'different',
+      'something else',
+    ];
+    return exitIndicators.some((indicator) => lastMessage.includes(indicator));
+  }
+
+  private async needsNameValidation(
+    state: OrchestratorState,
+  ): Promise<boolean> {
+    if (state.metadata?.currentProcess !== ProcessType.REGISTRATION) {
+      return false;
+    }
+    if (state.metadata?.registrationStep !== RegistrationSteps.COLLECT_NAME) {
+      return false;
+    }
+    const lastMessage = state.metadata?.lastMessage || '';
+    // Check if it looks like a name but hasn't been confirmed
+    const words = lastMessage.split(/\s+/);
+    const hasSpecialChars = /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]+/.test(
+      lastMessage,
+    );
+    const isQuestion = lastMessage.includes('?');
+    const isReasonableLength =
+      lastMessage.length >= 2 && lastMessage.length <= 100;
+    const hasReasonableWordCount = words.length >= 1 && words.length <= 5;
+
+    return (
+      isReasonableLength &&
+      hasReasonableWordCount &&
+      !hasSpecialChars &&
+      !isQuestion &&
+      !lastMessage.toLowerCase().includes('confirm')
+    );
+  }
+
+  private async needsEmailValidation(
+    state: OrchestratorState,
+  ): Promise<boolean> {
+    if (state.metadata?.currentProcess !== ProcessType.REGISTRATION) {
+      return false;
+    }
+    if (state.metadata?.registrationStep !== RegistrationSteps.COLLECT_EMAIL) {
+      return false;
+    }
+    const lastMessage = state.metadata?.lastMessage || '';
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return (
+      emailRegex.test(lastMessage) &&
+      !lastMessage.toLowerCase().includes('confirm')
+    );
+  }
+
+  private handleCommand(
+    command: Command,
+    state: OrchestratorState,
+  ): RoutingDecision {
+    try {
+      // Check if this is a resume command
+      if ('resume' in command && command.resume) {
+        const resumeValue =
+          typeof command.resume === 'string'
+            ? command.resume
+            : typeof command.resume === 'object' && 'value' in command.resume
+              ? String(command.resume.value)
+              : '';
+
+        // Handle different interrupt types
+        switch (state.metadata?.interruptType) {
+          case 'process_exit':
+            // If user confirms exit
+            if (resumeValue.toLowerCase().includes('yes')) {
+              return {
+                routeTo: GENERAL_ASSISTANT_WORKER,
+                reasoning: 'User confirmed exit from current process',
+                shouldMaintainProcess: false,
+              };
+            }
+            // Continue current process
+            return {
+              routeTo: this.getWorkerForProcessType(
+                state.memoryContext?.currentProcess,
+              ),
+              reasoning: 'User wants to continue current process',
+              shouldMaintainProcess: true,
+            };
+
+          case 'name_validation':
+          case 'email_validation':
+            // Continue with registration after validation
+            return {
+              routeTo: REGISTRATION_WORKER,
+              reasoning: 'Continuing registration after validation',
+              shouldMaintainProcess: true,
+            };
+
+          default:
+            // Default to general assistant if interrupt type is unknown
+            return {
+              routeTo: GENERAL_ASSISTANT_WORKER,
+              reasoning:
+                'Unknown interrupt type, defaulting to general assistant',
+              shouldMaintainProcess: false,
+            };
+        }
+      }
+
+      // For other command types, default to general assistant
+      return {
+        routeTo: GENERAL_ASSISTANT_WORKER,
+        reasoning: 'Default routing for command handling',
+        shouldMaintainProcess: false,
+      };
+    } catch (error) {
+      this.logger.error('Error handling command', error);
+      return {
+        routeTo: ERROR_HANDLER,
+        reasoning: 'Error occurred during command handling',
+        shouldMaintainProcess: false,
+      };
+    }
+  }
+
+  private async analyzeWithReactAgent(
+    state: OrchestratorState,
+  ): Promise<RoutingDecision> {
+    try {
+      // Create the orchestrator agent
+      const agent = await this.createOrchestratorAgent(
+        this.reactAgentModel,
+        state,
+      );
+
+      // Prepare messages for the agent
+      const messages = state.messages.map((msg) => ({
+        role:
+          msg._getType?.() === 'human'
+            ? 'user'
+            : msg._getType?.() === 'ai'
+              ? 'assistant'
+              : 'system',
+        content:
+          typeof msg.content === 'string'
+            ? msg.content
+            : JSON.stringify(msg.content),
+      }));
+
+      // If no messages, use the last message from metadata
+      if (messages.length === 0 && state.metadata?.lastMessage) {
+        messages.push({
+          role: 'user',
+          content: state.metadata.lastMessage,
+        });
+      }
+
+      // Invoke the agent
+      const result = await agent.invoke({ messages });
+
+      // Extract the structured response
+      if (
+        result &&
+        typeof result === 'object' &&
+        'structuredResponse' in result &&
+        result.structuredResponse &&
+        typeof result.structuredResponse === 'object'
+      ) {
+        const structured = result.structuredResponse as any;
+
+        return {
+          routeTo: structured.routeTo || GENERAL_ASSISTANT_WORKER,
+          reasoning: structured.reasoning || 'Default routing by orchestrator',
+          shouldMaintainProcess: structured.shouldMaintainProcess ?? true,
+        };
+      }
+
+      // Fallback for unexpected response structure
+      this.logger.warn('ReactAgent returned unexpected response structure', {
+        result,
+      });
+      return {
+        routeTo: GENERAL_ASSISTANT_WORKER,
+        reasoning:
+          'Unexpected agent response format, defaulting to general assistant',
+        shouldMaintainProcess: false,
+      };
+    } catch (error) {
+      this.logger.error('Error using ReactAgent for routing analysis', error);
+      return {
+        routeTo: GENERAL_ASSISTANT_WORKER,
+        reasoning:
+          'Error occurred during intelligent routing, defaulting to general assistant',
+        shouldMaintainProcess: false,
+      };
+    }
+  }
+}
+
+
+// orchestrator-pattern/graph/workflow.ts
+
+import { BaseMessage, HumanMessage } from '@langchain/core/messages';
+import { END, START, StateGraph } from '@langchain/langgraph';
+import { Injectable, Logger } from '@nestjs/common';
+import {
+  ErrorHandlerService,
+  FinancialCoachWorker,
+  GeneralAssistantWorker,
+  OrchestratorAgent,
+  RegistrationWorker,
+} from '../agents';
+import { TamyMemoryService } from '../memory';
+import { InputSanitizerService, OutputSanitizerService } from '../sanitizers';
+import {
+  ERROR_HANDLER,
+  FINANCIAL_COACH_WORKER,
+  GENERAL_ASSISTANT_WORKER,
+  INPUT_SANITIZER,
+  ORCHESTRATOR,
+  OrchestratorNodes,
+  OrchestratorState,
+  orchestratorStateChannels,
+  OUTPUT_SANITIZER,
+  ProcessType,
+  REGISTRATION_WORKER,
+} from '../types';
+
+@Injectable()
+export class WorkflowService {
+  private readonly logger = new Logger(WorkflowService.name);
+
+  constructor(
+    private readonly tamyMemory: TamyMemoryService,
+    private readonly orchestratorAgent: OrchestratorAgent,
+    private readonly registrationWorker: RegistrationWorker,
+    private readonly financialCoachWorker: FinancialCoachWorker,
+    private readonly generalAssistantWorker: GeneralAssistantWorker,
+    private readonly errorHandler: ErrorHandlerService,
+    private readonly inputSanitizer: InputSanitizerService,
+    private readonly outputSanitizer: OutputSanitizerService,
+  ) {}
+
+  async createWorkflow() {
+    try {
+      this.logger.debug('Creating orchestrator-worker-sanitizer workflow');
+
+      // Initialize the StateGraph with proper typing
+      const workflow = new StateGraph<
+        OrchestratorState,
+        OrchestratorState,
+        Partial<OrchestratorState>,
+        OrchestratorNodes
+      >({
+        channels: orchestratorStateChannels,
+      });
+
+      // Add nodes for the workflow
+      this.logger.debug('Adding nodes to workflow');
+
+      // Add the input sanitizer node
+      workflow.addNode(INPUT_SANITIZER, async (state: OrchestratorState) => {
+        return await this.inputSanitizer.sanitizeInput(state);
+      });
+
+      // Add the orchestrator node
+      workflow.addNode(ORCHESTRATOR, async (state: OrchestratorState) => {
+        return await this.orchestratorAgent.orchestrate(state);
+      });
+
+      // Add the registration worker node
+      workflow.addNode(
+        REGISTRATION_WORKER,
+        async (state: OrchestratorState) => {
+          return await this.registrationWorker.processRegistration(state);
+        },
+      );
+
+      // Add the financial coach worker node
+      workflow.addNode(
+        FINANCIAL_COACH_WORKER,
+        async (state: OrchestratorState) => {
+          return await this.financialCoachWorker.provideFinancialEducation(
+            state,
+          );
+        },
+      );
+
+      // Add the general assistant worker node
+      workflow.addNode(
+        GENERAL_ASSISTANT_WORKER,
+        async (state: OrchestratorState) => {
+          return await this.generalAssistantWorker.handleGeneralInquiry(state);
+        },
+      );
+
+      // Add the output sanitizer node
+      workflow.addNode(OUTPUT_SANITIZER, async (state: OrchestratorState) => {
+        return await this.outputSanitizer.sanitizeOutput(state);
+      });
+
+      // Add the error handler node
+      workflow.addNode(ERROR_HANDLER, async (state: OrchestratorState) => {
+        return await this.errorHandler.handleError(state);
+      });
+
+      // Add edges for the workflow
+      this.logger.debug('Adding edges to workflow');
+
+      // Initial entry point goes to input sanitizer
+      workflow.addEdge(START, INPUT_SANITIZER);
+
+      // Input sanitizer goes to orchestrator
+      workflow.addEdge(INPUT_SANITIZER, ORCHESTRATOR);
+
+      // Orchestrator decides where to go next
+      workflow.addConditionalEdges(
+        ORCHESTRATOR,
+        async (state: OrchestratorState) => state.next || END,
+        [
+          REGISTRATION_WORKER,
+          FINANCIAL_COACH_WORKER,
+          GENERAL_ASSISTANT_WORKER,
+          ERROR_HANDLER,
+          END,
+        ],
+      );
+
+      // Worker nodes go to output sanitizer
+      workflow.addEdge(REGISTRATION_WORKER, OUTPUT_SANITIZER);
+      workflow.addEdge(FINANCIAL_COACH_WORKER, OUTPUT_SANITIZER);
+      workflow.addEdge(GENERAL_ASSISTANT_WORKER, OUTPUT_SANITIZER);
+
+      // Output sanitizer always ends the conversation
+      workflow.addEdge(OUTPUT_SANITIZER, END);
+
+      // Error handler goes back to orchestrator
+      workflow.addEdge(ERROR_HANDLER, ORCHESTRATOR);
+
+      // Compile and return the workflow
+      this.logger.debug('Compiling workflow');
+      return workflow.compile({
+        name: 'tamy-finance-orchestrator-workflow',
+        checkpointer: this.tamyMemory.getMemorySaver(),
+      });
+    } catch (error) {
+      this.logger.error('Error creating workflow', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Gets the current state for a thread
+   * @param threadId - ID of the thread to get state for
+   * @returns Current state if exists, null otherwise
+   */
+  async getThreadState(threadId: string): Promise<OrchestratorState | null> {
+    try {
+      // Get the memorySaver instance
+      const memorySaver = this.tamyMemory.getMemorySaver();
+
+      // Attempt to get the state from memory
+      const savedState = await memorySaver.get({
+        configurable: { thread_id: threadId },
+      });
+      console.log("🚀 ~ WorkflowService ~ getThreadState ~ savedState:", savedState)
+
+      if (!savedState) {
+        return null;
+      }
+
+      // In LangGraph, the actual state is nested inside channel_values
+      const channelValues = savedState.channel_values;
+
+      // If channel_values doesn't exist, we can't proceed
+      if (!channelValues || typeof channelValues !== 'object') {
+        this.logger.warn(
+          `Retrieved thread state missing channel_values for thread ${threadId}`,
+        );
+        return null;
+      }
+
+      // Extract the state from channel_values
+      const state = channelValues as any as OrchestratorState;
+
+      // Verify that it has basic structure of OrchestratorState
+      if (!state.messages || !Array.isArray(state.messages)) {
+        this.logger.warn(
+          `Retrieved thread state has invalid message structure for thread ${threadId}`,
+        );
+        return null;
+      }
+
+      // Initialize missing fields with defaults if needed
+      state.metadata = state.metadata || {
+        threadId,
+        channelType: 'WHATSAPP',
+        userPhone: state.userId || '',
+        inputValidated: false,
+        outputValidated: false,
+        isNewConversation: false,
+      };
+
+      state.memoryContext = state.memoryContext || {
+        relevantHistory: '',
+        lastInteraction: new Date(),
+        currentStep: '',
+      };
+
+      // Enhanced registration state preservation
+      if (state.memoryContext?.currentProcess === ProcessType.REGISTRATION) {
+        this.logger.debug(
+          `Preserving registration state for thread ${threadId}`,
+          {
+            currentStep: state.memoryContext?.currentStep,
+            registrationState: JSON.stringify(
+              state.memoryContext?.registrationState,
+            ),
+            currentProcess: state.memoryContext?.currentProcess,
+          },
+        );
+
+        // Ensure next node is REGISTRATION_WORKER to maintain registration flow
+        if (state.memoryContext?.registrationState?.step) {
+          this.logger.debug(
+            `Ensuring registration continuity with step: ${state.memoryContext.registrationState.step}`,
+          );
+
+          // Force next node to be registration worker to maintain context
+          state.next = REGISTRATION_WORKER;
+
+          // If we've already collected some information, ensure it's preserved
+          if (
+            !state.metadata.routingReason &&
+            state.next === REGISTRATION_WORKER
+          ) {
+            state.metadata.routingReason = `Maintaining registration flow at step ${state.memoryContext.registrationState.step}.`;
+          }
+        }
+
+        // If we're at a specific registration step but interruptedProcess is set,
+        // it might be causing confusion - clear it
+        if (
+          state.memoryContext?.interruptedProcess?.type ===
+            ProcessType.REGISTRATION &&
+          state.memoryContext?.currentProcess === ProcessType.REGISTRATION
+        ) {
+          this.logger.debug(
+            'Clearing interrupted process as we are already in registration',
+            {
+              threadId,
+              currentStep: state.memoryContext?.currentStep,
+            },
+          );
+          state.memoryContext.interruptedProcess = undefined;
+        }
+      }
+
+      // Apply deduplication on retrieved state
+      state.messages = this.tamyMemory.deduplicateMessages(state.messages);
+
+      return state;
+    } catch (error) {
+      this.logger.error(
+        `Error retrieving thread state: ${error instanceof Error ? error.message : String(error)}`,
+        error instanceof Error ? error.stack : undefined,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Ensure we don't have too many messages by applying aggressive deduplication
+   * @param state Current state to clean up
+   * @returns Cleaned state with deduped messages
+   */
+  private ensureCleanState(state: OrchestratorState): OrchestratorState {
+    if (!state || !state.messages || !Array.isArray(state.messages)) {
+      return state;
+    }
+
+    // Apply our enhanced deduplication
+    state.messages = this.tamyMemory.deduplicateMessages(state.messages);
+
+    return state;
+  }
+
+  async processMessage(
+    userId: string,
+    threadId: string,
+    message: string,
+    isRegistered: boolean = false,
+  ) {
+    console.log("🚀 ~ WorkflowService ~ processMessage ~ message:", message)
+    console.log("🚀 ~ WorkflowService ~ processMessage ~ isRegistered:", isRegistered)
+    console.log("🚀 ~ WorkflowService ~ processMessage ~ userId:", userId)
+    console.log("🚀 ~ WorkflowService ~ processMessage ~ threadId:", threadId)
+    try {
+      this.logger.debug('Processing message', {
+        userId,
+        threadId,
+        messageLength: message.length,
+        isRegistered,
+      });
+
+      // Create or retrieve workflow
+      const workflow = await this.createWorkflow();
+
+      // Retrieve existing thread state before processing
+      const existingState = await this.getThreadState(threadId);
+
+      // Check for active registration flow
+      const isInRegistrationFlow =
+        existingState &&
+        existingState.memoryContext &&
+        existingState.memoryContext.currentProcess ===
+          ProcessType.REGISTRATION &&
+        existingState.memoryContext.registrationState &&
+        existingState.memoryContext.registrationState.step;
+
+      if (
+        isInRegistrationFlow &&
+        existingState &&
+        existingState.memoryContext
+      ) {
+        this.logger.debug('Detected active registration flow', {
+          step: existingState.memoryContext.registrationState?.step,
+          isRegistered,
+        });
+      }
+
+      // Set up thread configuration
+      const config = {
+        configurable: {
+          thread_id: threadId,
+        },
+      };
+
+      // IMPORTANT: This is a utility function to strictly deduplicate messages
+      const deduplicateAndPruneMessages = (messages: any[]): BaseMessage[] => {
+        if (!messages || !Array.isArray(messages))
+          return [new HumanMessage(message)];
+
+        this.logger.debug(
+          `Deduplicating initial state (before: ${messages.length} messages)`,
+        );
+
+        // First deduplicate messages based on content and type
+        const seen = new Map();
+        const uniqueMessages = [];
+
+        // Process in reverse to prefer newer messages
+        for (let i = messages.length - 1; i >= 0; i--) {
+          const msg = messages[i];
+
+          // Skip null or undefined messages
+          if (!msg) continue;
+
+          // Extract key identifiers from message
+          let content = '';
+          let type = '';
+
+          if (msg._getType && typeof msg._getType === 'function') {
+            type = msg._getType();
+            content =
+              typeof msg.content === 'string'
+                ? msg.content
+                : JSON.stringify(msg.content || '');
+          } else if (msg.role) {
+            type = msg.role;
+            content =
+              typeof msg.content === 'string'
+                ? msg.content
+                : JSON.stringify(msg.content || '');
+          } else if (msg.type) {
+            type = msg.type;
+            content =
+              typeof msg.content === 'string'
+                ? msg.content
+                : msg.text || JSON.stringify(msg.content || '');
+          }
+
+          const key = `${type}:${content}`;
+
+          if (!seen.has(key)) {
+            seen.set(key, true);
+            uniqueMessages.unshift(msg);
+          }
+        }
+
+        // Now strictly enforce a maximum size
+        const MAX_HISTORY = 6; // Reduced from 10 to prevent size issues
+
+        // Split into system and non-system messages - carefully check for nulls
+        const systemMessages = uniqueMessages.filter(
+          (m) =>
+            m &&
+            ((m._getType &&
+              typeof m._getType === 'function' &&
+              m._getType() === 'system') ||
+              (m.role && m.role === 'system')),
+        );
+
+        const nonSystemMessages = uniqueMessages.filter(
+          (m) =>
+            m &&
+            ((m._getType &&
+              typeof m._getType === 'function' &&
+              m._getType() !== 'system') ||
+              !m.role ||
+              m.role !== 'system'),
+        );
+
+        // Ensure we have the current message at the end
+        let currentMessageIncluded = false;
+        for (const msg of nonSystemMessages) {
+          if (
+            msg &&
+            msg.content &&
+            ((typeof msg.content === 'string' && msg.content === message) ||
+              (typeof msg.content === 'object' &&
+                JSON.stringify(msg.content) === message))
+          ) {
+            currentMessageIncluded = true;
+            break;
+          }
+        }
+
+        // Add the new message if it wasn't found
+        if (!currentMessageIncluded) {
+          nonSystemMessages.push(new HumanMessage(message));
+        }
+
+        // Keep only last few non-system messages
+        const recentMessages = nonSystemMessages.slice(-MAX_HISTORY);
+
+        // Combine system messages with recent messages
+        const prunedMessages = [...systemMessages, ...recentMessages];
+
+        this.logger.debug(
+          `State deduplication complete (after: ${prunedMessages.length} messages)`,
+        );
+
+        return prunedMessages;
+      };
+
+      // Create initial state with memory-enhanced context
+      const initialState = {
+        messages: [new HumanMessage(message)],
+        userId,
+        threadId,
+        isRegistered,
+        metadata: {
+          threadId,
+          channelType: 'WHATSAPP',
+          userPhone: userId,
+          inputValidated: false,
+          outputValidated: false,
+          isNewConversation: !existingState, // Only true if no existing state
+        },
+      };
+
+      // Process the initial state with memory context
+      const stateWithMemory = await this.tamyMemory.processStateWithMemory(
+        initialState,
+        message,
+      );
+
+      // Apply strict deduplication to start with a clean state
+      stateWithMemory.messages = deduplicateAndPruneMessages(
+        stateWithMemory.messages,
+      );
+
+      // If we have an active registration process, ensure we preserve it
+      if (
+        isInRegistrationFlow &&
+        existingState &&
+        existingState.memoryContext
+      ) {
+        this.logger.debug('Preserving registration flow state', {
+          currentStep: existingState.memoryContext.currentStep,
+          registrationStep: existingState.memoryContext.registrationState?.step,
+        });
+
+        // Make sure we don't lose registration state - explicitly set it
+        stateWithMemory.memoryContext = {
+          ...stateWithMemory.memoryContext,
+          currentProcess: ProcessType.REGISTRATION,
+          currentStep: existingState.memoryContext.currentStep || '',
+          registrationState: existingState.memoryContext.registrationState,
+        };
+
+        // Set next node directly to registration worker to bypass orchestrator decision
+        stateWithMemory.next = REGISTRATION_WORKER;
+      }
+      // If user is already registered, ensure we don't accidentally trigger registration flow
+      else if (isRegistered && !stateWithMemory.memoryContext?.currentProcess) {
+        this.logger.debug(
+          'User is already registered, starting with general assistant process',
+          {
+            userId,
+            threadId,
+          },
+        );
+
+        // Set current process to general assistant for already registered users
+        stateWithMemory.memoryContext = {
+          ...stateWithMemory.memoryContext,
+          currentProcess: ProcessType.GENERAL_ASSISTANT,
+        };
+      }
+
+      // Stream the results
+      const events = [];
+      let lastState = null;
+
+      for await (const event of await workflow.stream(
+        stateWithMemory,
+        config,
+      )) {
+        // Apply our deduplication function at each node transition
+        if (event && event.messages && Array.isArray(event.messages)) {
+          this.ensureCleanState(event as OrchestratorState);
+        }
+
+        events.push(event);
+        lastState = event;
+      }
+
+      // After processing, save the last AI message to memory
+      if (lastState) {
+        // Ensure we have a clean state before saving
+        lastState = this.ensureCleanState(lastState as OrchestratorState);
+        await this.tamyMemory.saveAIMessageToMemory(lastState);
+      }
+
+      // Return all events for debugging
+      return events;
+    } catch (error) {
+      this.logger.error('Error processing message', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Determines the next path to take in the workflow
+   */
+  branch = async (state: OrchestratorState): Promise<string> => {
+    try {
+      // Priority 1: If we're in registration process, strictly enforce continuity
+      if (
+        state.memoryContext?.currentProcess === ProcessType.REGISTRATION &&
+        state.memoryContext?.currentStep
+      ) {
+        this.logger.debug('Enforcing registration process continuity', {
+          step: state.memoryContext.currentStep,
+        });
+        return REGISTRATION_WORKER;
+      }
+
+      // Priority 2: Follow the next value if it's set
+      if (state.next && state.next !== 'branch') {
+        this.logger.debug(`Following next value: ${state.next}`);
+        return state.next;
+      }
+
+      // Priority 3: Validate user authentication status
+      if (!state.isRegistered) {
+        this.logger.debug('User not registered, routing to registration');
+        return REGISTRATION_WORKER;
+      }
+
+      // Priority 4: Check for interrupted processes that need to be resumed
+      if (state.memoryContext?.interruptedProcess) {
+        this.logger.debug('Resuming interrupted process', {
+          type: state.memoryContext.interruptedProcess.type,
+        });
+
+        // Map the process type to the appropriate worker
+        switch (state.memoryContext.interruptedProcess.type) {
+          case ProcessType.REGISTRATION:
+            return REGISTRATION_WORKER;
+          // Add cases for other process types as needed
+          default:
+            // If we don't recognize the process type, fallback to general assistant
+            return GENERAL_ASSISTANT_WORKER;
+        }
+      }
+
+      // Default to general assistant for registered users
+      this.logger.debug(
+        'No special routing conditions, using general assistant',
+      );
+      return GENERAL_ASSISTANT_WORKER;
+    } catch (error) {
+      this.logger.error('Error in branch function', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return ERROR_HANDLER;
+    }
+  };
+}
+
+
+// orchestrator-pattern/memory/index.ts
+
+import { WeaviateModule } from '@/core/integrations/weaviate/weaviate.module';
+import { MemoryManagerService } from './memory-manager.service';
+import { Module } from '@nestjs/common';
+import { TamyMemoryService } from './tamy-memory-saver';
+
+@Module({
+  imports: [WeaviateModule],
+  providers: [MemoryManagerService, TamyMemoryService],
+  exports: [MemoryManagerService, TamyMemoryService],
+})
+export class MemoryModule {}
+
+export * from './memory-manager.service';
+export * from './tamy-memory-saver';
+
+
+// orchestrator-pattern/memory/semantic-memory.store.ts
+
+import { Document } from '@langchain/core/documents';
+import { MemoryVectorStore } from 'langchain/vectorstores/memory';
+import { Embeddings } from '@langchain/core/embeddings';
+import {
+  FinancialMemory,
+  MemoryConfig,
+  MemorySearchResult,
+  MemoryStore,
+} from '../types/memory.types';
+
+interface SemanticMemoryStoreConfig {
+  embeddings: Embeddings;
+  namespace: string;
+  minScore?: number;
+  maxResults?: number;
+}
+
+type SearchResult = [Document<Record<string, any>>, number];
+
+export class SemanticMemoryStore implements MemoryStore {
+  private readonly vectorStore: MemoryVectorStore;
+  private readonly minScore: number;
+  private readonly maxResults: number;
+
+  constructor(config: SemanticMemoryStoreConfig) {
+    this.vectorStore = new MemoryVectorStore(config.embeddings);
+    this.minScore = config.minScore || 0.7;
+    this.maxResults = config.maxResults || 10;
+  }
+
+  async addMemory(memory: FinancialMemory): Promise<void> {
+    const doc = new Document({
+      pageContent: memory.content,
+      metadata: {
+        userId: memory.metadata.userId,
+        timestamp: memory.metadata.timestamp,
+        threadId: memory.metadata.threadId,
+        category: memory.metadata.category,
+        amount: memory.metadata.amount,
+        confidence: memory.metadata.confidence,
+        source: memory.metadata.source,
+        type: memory.type,
+      },
+    });
+
+    await this.vectorStore.addDocuments([doc]);
+  }
+
+  async searchMemories(
+    query: string,
+    options: {
+      type?: FinancialMemory['type'];
+      userId?: string;
+      limit?: number;
+      minScore?: number;
+    } = {},
+  ): Promise<MemorySearchResult[]> {
+    const filter = (doc: Document<Record<string, any>>) => {
+      if (options.userId && doc.metadata.userId !== options.userId) {
+        return false;
+      }
+      if (options.type && doc.metadata.type !== options.type) {
+        return false;
+      }
+      return true;
+    };
+
+    const results = await this.vectorStore.similaritySearchWithScore(
+      query,
+      options.limit || this.maxResults,
+      filter,
+    );
+
+    return results
+      .filter(
+        ([, score]: SearchResult) =>
+          score >= (options.minScore || this.minScore),
+      )
+      .map(([doc, score]: SearchResult) => ({
+        memory: {
+          type: doc.metadata.type,
+          content: doc.pageContent,
+          metadata: {
+            userId: doc.metadata.userId,
+            timestamp: doc.metadata.timestamp,
+            threadId: doc.metadata.threadId,
+            category: doc.metadata.category,
+            amount: doc.metadata.amount,
+            confidence: doc.metadata.confidence,
+            source: doc.metadata.source,
+          },
+        },
+        score,
+      }));
+  }
+
+  async getUserMemories(
+    userId: string,
+    type?: FinancialMemory['type'],
+  ): Promise<FinancialMemory[]> {
+    const filter = (doc: Document<Record<string, any>>) => {
+      if (doc.metadata.userId !== userId) {
+        return false;
+      }
+      if (type && doc.metadata.type !== type) {
+        return false;
+      }
+      return true;
+    };
+
+    const results = await this.vectorStore.similaritySearch(
+      '',
+      this.maxResults,
+      filter,
+    );
+
+    return results.map((doc: Document<Record<string, any>>) => ({
+      type: doc.metadata.type,
+      content: doc.pageContent,
+      metadata: {
+        userId: doc.metadata.userId,
+        timestamp: doc.metadata.timestamp,
+        threadId: doc.metadata.threadId,
+        category: doc.metadata.category,
+        amount: doc.metadata.amount,
+        confidence: doc.metadata.confidence,
+        source: doc.metadata.source,
+      },
+    }));
+  }
+
+  async deleteMemories(criteria: {
+    userId?: string;
+    type?: FinancialMemory['type'];
+    before?: number;
+  }): Promise<void> {
+    // Implementation depends on the vector store's delete capabilities
+    throw new Error('Delete operation not supported in semantic memory store');
+  }
+}
+
+
+// orchestrator-pattern/agents/registration.agent.ts
+
+import { AIMessage } from '@langchain/core/messages';
+import { RunnableConfig } from '@langchain/core/runnables';
+import { Injectable, Logger } from '@nestjs/common';
+import {
+  ERROR_HANDLER,
+  MemoryContext,
+  OrchestratorState,
+  OUTPUT_SANITIZER,
+  ProcessType,
+  REGISTRATION_WORKER,
+} from '../types';
+import { RegistrationTools } from '../tools/registration.tool';
+
+@Injectable()
+export class RegistrationWorker {
+  private readonly logger = new Logger(RegistrationWorker.name);
+
+  constructor(private readonly registrationTools: RegistrationTools) {}
+
+  /**
+   * Process registration by sending a WhatsApp form to the user
+   */
+  async processRegistration(
+    state: OrchestratorState,
+    config?: RunnableConfig,
+  ): Promise<OrchestratorState> {
+    try {
+      this.logger.debug('Processing registration request', {
+        userId: state.userId,
+        threadId: state.threadId,
+      });
+
+      // Get the user's phone number from state
+      const userPhone = state.metadata.userPhone || state.userId;
+
+      if (!userPhone) {
+        throw new Error('User phone number not found in state');
+      }
+
+      // Get the send registration form tool
+      const sendRegistrationTool = this.registrationTools
+        .getAllTools()
+        .find((tool) => tool.name === 'send_registration_form');
+
+      if (!sendRegistrationTool) {
+        throw new Error('Send registration form tool not found');
+      }
+
+      // Send the registration form
+      const result = await sendRegistrationTool.invoke({
+        phoneNumber: userPhone,
+      });
+
+      const parsedResult = JSON.parse(result);
+
+      // Create response message based on the result
+      const responseMessage = new AIMessage({
+        content: parsedResult.success
+          ? parsedResult.message
+          : 'Sorry, we encountered an error while trying to send you the registration form. Please try again later.',
+      });
+
+      // Create the updated memory context
+      const updatedMemoryContext: MemoryContext = {
+        relevantHistory: state.memoryContext?.relevantHistory || '',
+        summary: state.memoryContext?.summary,
+        currentProcess: ProcessType.GENERAL_ASSISTANT,
+        currentStep: '',
+        lastInteraction: new Date(),
+        interruptedProcess: undefined,
+        lastDiversion: state.memoryContext?.lastDiversion,
+      };
+
+      // Return updated state
+      return {
+        ...state,
+        messages: [...state.messages, responseMessage],
+        next: OUTPUT_SANITIZER,
+        metadata: {
+          ...state.metadata,
+          lastNode: REGISTRATION_WORKER,
+        },
+        memoryContext: updatedMemoryContext,
+      };
+    } catch (error) {
+      this.logger.error('Error in registration process', error);
+      return {
+        ...state,
+        next: ERROR_HANDLER,
+        metadata: {
+          ...state.metadata,
+          lastError: `Registration error: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+          lastNode: REGISTRATION_WORKER,
+        },
+      };
+    }
+  }
+}
+
+
+// orchestrator-pattern/memory/memory-manager.service.ts
+
+import { Injectable, Logger } from '@nestjs/common';
+import { OpenAIEmbeddings } from '@langchain/openai';
+
+import { SemanticMemoryStore } from './semantic-memory.store';
+import { WeaviateMemoryStore } from './weaviate-memory.store';
+import { WeaviateService } from '@/core/integrations/weaviate/weaviate.service';
+import { MemoryStore, FinancialMemory } from '../types/memory.types';
+
+@Injectable()
+export class MemoryManagerService {
+  private readonly logger = new Logger(MemoryManagerService.name);
+  private readonly inMemoryStore: MemoryStore;
+  private readonly weaviateStore: MemoryStore;
+
+  constructor(private readonly weaviateService: WeaviateService) {
+    // Initialize OpenAI embeddings
+    const embeddings = new OpenAIEmbeddings({
+      modelName: 'text-embedding-3-small',
+    });
+
+    // Initialize both stores
+    this.inMemoryStore = new SemanticMemoryStore({
+      embeddings,
+      namespace: 'temp-memory',
+      minScore: 0.7,
+      maxResults: 10,
+    });
+
+    this.weaviateStore = new WeaviateMemoryStore(weaviateService);
+  }
+
+  private getStore(isRegistered: boolean): MemoryStore {
+    return isRegistered ? this.weaviateStore : this.inMemoryStore;
+  }
+
+  async storeMemory(
+    memory: FinancialMemory,
+    isRegistered: boolean,
+  ): Promise<void> {
+    const store = this.getStore(isRegistered);
+    await store.addMemory(memory);
+  }
+
+  async searchRelevantMemories(
+    query: string,
+    userId: string,
+    isRegistered: boolean,
+    type?: FinancialMemory['type'],
+  ) {
+    const store = this.getStore(isRegistered);
+    return store.searchMemories(query, {
+      userId,
+      type,
+      limit: 5, // Limit to most relevant memories
+    });
+  }
+
+  async getContextForPrompt(
+    userId: string,
+    query: string,
+    isRegistered: boolean,
+  ): Promise<string> {
+    const store = this.getStore(isRegistered);
+    const relevantMemories = await store.searchMemories(query, {
+      userId,
+      limit: 3,
+      minScore: 0.8,
+    });
+
+    if (relevantMemories.length === 0) {
+      return '';
+    }
+
+    // Format memories into a context string
+    const context = relevantMemories
+      .map(({ memory }) => {
+        const timestamp = new Date(memory.metadata.timestamp).toLocaleString();
+        return `[${timestamp}] ${memory.type}: ${memory.content}`;
+      })
+      .join('\n');
+
+    return `Relevant context from past interactions:\n${context}\n\n`;
+  }
+
+  async storeConversationMemory(
+    userId: string,
+    content: string,
+    isRegistered: boolean,
+    metadata: Partial<FinancialMemory['metadata']> = {},
+  ): Promise<void> {
+    const memory: FinancialMemory = {
+      type: 'conversation',
+      content,
+      metadata: {
+        userId,
+        timestamp: Date.now(),
+        ...metadata,
+      },
+    };
+
+    await this.storeMemory(memory, isRegistered);
+  }
+
+  async storeFinancialAction(
+    userId: string,
+    action: string,
+    isRegistered: boolean,
+    amount?: number,
+    category?: string,
+  ): Promise<void> {
+    const memory: FinancialMemory = {
+      type: 'action',
+      content: action,
+      metadata: {
+        userId,
+        timestamp: Date.now(),
+        amount,
+        category,
+      },
+    };
+
+    await this.storeMemory(memory, isRegistered);
+  }
+
+  async storeUserPreference(
+    userId: string,
+    preference: string,
+    isRegistered: boolean,
+    category?: string,
+  ): Promise<void> {
+    const memory: FinancialMemory = {
+      type: 'preference',
+      content: preference,
+      metadata: {
+        userId,
+        timestamp: Date.now(),
+        category,
+      },
+    };
+
+    await this.storeMemory(memory, isRegistered);
+  }
+
+  async cleanupOldMemories(
+    userId: string,
+    beforeTimestamp: number,
+    isRegistered: boolean,
+    type?: FinancialMemory['type'],
+  ): Promise<void> {
+    const store = this.getStore(isRegistered);
+    await store.deleteMemories({
+      userId,
+      type,
+      before: beforeTimestamp,
+    });
+  }
+}
+
+
+// orchestrator-pattern/memory/weaviate-memory.schema.ts
+
+export interface FinancialMemoryData {
+  userId: string;
+  threadId?: string;
+  type: 'transaction' | 'preference' | 'conversation' | 'action';
+  content: string;
+  category?: string;
+  amount?: number;
+  confidence?: number;
+  source?: string;
+  timestamp: Date;
+}
+
+export const FINANCIAL_MEMORY_CLASS_NAME = 'FinancialMemory';
+
+export const FINANCIAL_MEMORY_SCHEMA = {
+  class: FINANCIAL_MEMORY_CLASS_NAME,
+  description: 'Long-term financial memory for registered users',
+  vectorizer: 'text2vec-openai',
+  moduleConfig: {
+    'text2vec-openai': {
+      model: 'text-embedding-3-small',
+      modelVersion: '3',
+      type: 'text',
+    },
+  },
+  properties: [
+    {
+      name: 'userId',
+      description: 'The unique identifier of the user',
+      dataType: ['string'],
+      moduleConfig: {
+        'text2vec-openai': { skip: true },
+      },
+    },
+    {
+      name: 'threadId',
+      description: 'The conversation thread ID',
+      dataType: ['string'],
+      moduleConfig: {
+        'text2vec-openai': { skip: true },
+      },
+    },
+    {
+      name: 'type',
+      description: 'The type of memory',
+      dataType: ['string'],
+      moduleConfig: {
+        'text2vec-openai': { skip: true },
+      },
+    },
+    {
+      name: 'content',
+      description: 'The actual content of the memory',
+      dataType: ['text'],
+    },
+    {
+      name: 'category',
+      description: 'Optional category for the memory',
+      dataType: ['string'],
+      moduleConfig: {
+        'text2vec-openai': { skip: true },
+      },
+    },
+    {
+      name: 'amount',
+      description: 'Optional amount for financial transactions',
+      dataType: ['number'],
+      moduleConfig: {
+        'text2vec-openai': { skip: true },
+      },
+    },
+    {
+      name: 'confidence',
+      description: 'Optional confidence score',
+      dataType: ['number'],
+      moduleConfig: {
+        'text2vec-openai': { skip: true },
+      },
+    },
+    {
+      name: 'source',
+      description: 'Optional source of the memory',
+      dataType: ['string'],
+      moduleConfig: {
+        'text2vec-openai': { skip: true },
+      },
+    },
+    {
+      name: 'timestamp',
+      description: 'When the memory was created',
+      dataType: ['date'],
+      moduleConfig: {
+        'text2vec-openai': { skip: true },
+      },
+    },
+  ],
+};
+
+
+// orchestrator-pattern/memory/weaviate-memory.store.ts
+
+import { Injectable, Logger } from '@nestjs/common';
+import { WeaviateService } from '@/core/integrations/weaviate/weaviate.service';
+import { WeaviateSchema } from '@/core/integrations/weaviate/interfaces/weaviate.interface';
+import {
+  FinancialMemory,
+  MemorySearchResult,
+  MemoryStore,
+} from '../types/memory.types';
+
+export const FINANCIAL_MEMORY_CLASS_NAME = 'FinancialMemory';
+
+export const FINANCIAL_MEMORY_SCHEMA: WeaviateSchema = {
+  class: FINANCIAL_MEMORY_CLASS_NAME,
+  description: 'Financial memory for registered users',
+  vectorizer: 'text2vec-openai',
+  moduleConfig: {
+    'text2vec-openai': {
+      model: 'text-embedding-3-small',
+      modelVersion: '3',
+      type: 'text',
+    },
+  },
+  properties: [
+    {
+      name: 'userId',
+      description: 'The ID of the user who owns this memory',
+      dataType: ['string'],
+      indexInverted: true,
+    },
+    {
+      name: 'threadId',
+      description: 'The conversation thread ID',
+      dataType: ['string'],
+      indexInverted: true,
+    },
+    {
+      name: 'type',
+      description: 'The type of financial memory',
+      dataType: ['string'],
+      indexInverted: true,
+    },
+    {
+      name: 'content',
+      description: 'The content of the memory',
+      dataType: ['text'],
+      moduleConfig: {
+        'text2vec-openai': {
+          skip: false,
+          vectorizePropertyName: false,
+        },
+      },
+    },
+    {
+      name: 'category',
+      description: 'The financial category',
+      dataType: ['string'],
+      indexInverted: true,
+    },
+    {
+      name: 'amount',
+      description: 'The financial amount',
+      dataType: ['number'],
+      indexInverted: true,
+    },
+    {
+      name: 'confidence',
+      description: 'Confidence score of the memory',
+      dataType: ['number'],
+      indexInverted: true,
+    },
+    {
+      name: 'source',
+      description: 'Source of the memory',
+      dataType: ['string'],
+      indexInverted: true,
+    },
+    {
+      name: 'timestamp',
+      description: 'When the memory was created',
+      dataType: ['date'],
+      indexInverted: true,
+    },
+  ],
+};
+
+@Injectable()
+export class WeaviateMemoryStore implements MemoryStore {
+  private readonly logger = new Logger(WeaviateMemoryStore.name);
+  private initialized = false;
+
+  constructor(private readonly weaviateService: WeaviateService) {}
+
+  private async ensureInitialized(): Promise<void> {
+    if (this.initialized) return;
+
+    try {
+      const schemaExists = await this.weaviateService.hasSchema(
+        FINANCIAL_MEMORY_CLASS_NAME,
+      );
+      if (!schemaExists) {
+        await this.weaviateService.createSchema(
+          FINANCIAL_MEMORY_CLASS_NAME,
+          FINANCIAL_MEMORY_SCHEMA,
+        );
+        this.logger.log(
+          `Created schema for class ${FINANCIAL_MEMORY_CLASS_NAME}`,
+        );
+      }
+      this.initialized = true;
+    } catch (error) {
+      this.logger.error('Failed to initialize WeaviateMemoryStore:', error);
+      throw error;
+    }
+  }
+
+  async addMemory(memory: FinancialMemory): Promise<void> {
+    await this.ensureInitialized();
+    try {
+      const weaviateObject = {
+        userId: memory.metadata.userId,
+        threadId: memory.metadata.threadId,
+        type: memory.type,
+        content: memory.content,
+        category: memory.metadata.category,
+        amount: memory.metadata.amount,
+        confidence: memory.metadata.confidence,
+        source: memory.metadata.source,
+        timestamp: memory.metadata.timestamp,
+      };
+
+      await this.weaviateService.addObject(
+        FINANCIAL_MEMORY_CLASS_NAME,
+        weaviateObject,
+      );
+    } catch (error) {
+      this.logger.error('Failed to add memory:', error);
+      throw error;
+    }
+  }
+
+  async searchMemories(
+    query: string,
+    options: {
+      type?: FinancialMemory['type'];
+      userId?: string;
+      limit?: number;
+      minScore?: number;
+    } = {},
+  ): Promise<MemorySearchResult[]> {
+    await this.ensureInitialized();
+    try {
+      const where: any = {};
+      if (options.userId) {
+        where.operator = 'And';
+        where.operands = [
+          { path: ['userId'], operator: 'Equal', valueString: options.userId },
+        ];
+        if (options.type) {
+          where.operands.push({
+            path: ['type'],
+            operator: 'Equal',
+            valueString: options.type,
+          });
+        }
+      } else if (options.type) {
+        where.path = ['type'];
+        where.operator = 'Equal';
+        where.valueString = options.type;
+      }
+
+      const results = await this.weaviateService.searchObjects(
+        FINANCIAL_MEMORY_CLASS_NAME,
+        query,
+        {
+          limit: options.limit || 10,
+          nearText: { concepts: [query] },
+          where: Object.keys(where).length > 0 ? where : undefined,
+          fields: [
+            'userId',
+            'threadId',
+            'type',
+            'content',
+            'category',
+            'amount',
+            'confidence',
+            'source',
+            'timestamp',
+            '_additional { certainty }',
+          ],
+        },
+      );
+
+      return results
+        .filter(
+          (result) =>
+            !options.minScore ||
+            result._additional.certainty >= options.minScore,
+        )
+        .map((result) => ({
+          memory: {
+            type: result.type,
+            content: result.content,
+            metadata: {
+              userId: result.userId,
+              threadId: result.threadId,
+              category: result.category,
+              amount: result.amount,
+              confidence: result.confidence,
+              source: result.source,
+              timestamp: new Date(result.timestamp).getTime(),
+            },
+          },
+          score: result._additional.certainty,
+        }));
+    } catch (error) {
+      this.logger.error('Failed to search memories:', error);
+      throw error;
+    }
+  }
+
+  async getUserMemories(
+    userId: string,
+    type?: FinancialMemory['type'],
+  ): Promise<FinancialMemory[]> {
+    await this.ensureInitialized();
+    try {
+      const where: any = {
+        operator: 'And',
+        operands: [
+          { path: ['userId'], operator: 'Equal', valueString: userId },
+        ],
+      };
+
+      if (type) {
+        where.operands.push({
+          path: ['type'],
+          operator: 'Equal',
+          valueString: type,
+        });
+      }
+
+      const results = await this.weaviateService.searchObjects(
+        FINANCIAL_MEMORY_CLASS_NAME,
+        '',
+        {
+          where,
+          fields: [
+            'userId',
+            'threadId',
+            'type',
+            'content',
+            'category',
+            'amount',
+            'confidence',
+            'source',
+            'timestamp',
+          ],
+        },
+      );
+
+      return results.map((result) => ({
+        type: result.type,
+        content: result.content,
+        metadata: {
+          userId: result.userId,
+          threadId: result.threadId,
+          category: result.category,
+          amount: result.amount,
+          confidence: result.confidence,
+          source: result.source,
+          timestamp: new Date(result.timestamp).getTime(),
+        },
+      }));
+    } catch (error) {
+      this.logger.error('Failed to get user memories:', error);
+      throw error;
+    }
+  }
+
+  async deleteMemories(criteria: {
+    userId?: string;
+    type?: FinancialMemory['type'];
+    before?: number;
+  }): Promise<void> {
+    await this.ensureInitialized();
+    try {
+      const where: any = {
+        operator: 'And',
+        operands: [],
+      };
+
+      if (criteria.userId) {
+        where.operands.push({
+          path: ['userId'],
+          operator: 'Equal',
+          valueString: criteria.userId,
+        });
+      }
+
+      if (criteria.type) {
+        where.operands.push({
+          path: ['type'],
+          operator: 'Equal',
+          valueString: criteria.type,
+        });
+      }
+
+      if (criteria.before) {
+        where.operands.push({
+          path: ['timestamp'],
+          operator: 'LessThan',
+          valueDate: new Date(criteria.before).toISOString(),
+        });
+      }
+
+      if (where.operands.length === 0) {
+        throw new Error('At least one deletion criterion must be specified');
+      }
+
+      await this.weaviateService.deleteObjects(
+        FINANCIAL_MEMORY_CLASS_NAME,
+        where,
+      );
+    } catch (error) {
+      this.logger.error('Failed to delete memories:', error);
+      throw error;
+    }
+  }
+}
+
+
+// orchestrator-pattern/agents/general-assistant.agent.ts
+
+import { AIMessage } from '@langchain/core/messages';
+import { RunnableConfig } from '@langchain/core/runnables';
+import { tool } from '@langchain/core/tools';
+import { createReactAgent } from '@langchain/langgraph/prebuilt';
+import { ChatOpenAI } from '@langchain/openai';
+import { Injectable, Logger } from '@nestjs/common';
+import { z } from 'zod';
+import {
+  GENERAL_ASSISTANT_WORKER,
+  InterruptedProcess,
+  MemoryContext,
+  OrchestratorState,
+  OUTPUT_SANITIZER,
+  ProcessType,
+  REGISTRATION_WORKER,
+  ERROR_HANDLER,
+} from '../types';
+
+@Injectable()
+export class GeneralAssistantWorker {
+  private readonly logger = new Logger(GeneralAssistantWorker.name);
+  private reactAgent;
+
+  constructor() {
+    const model = new ChatOpenAI({
+      modelName: 'gpt-4o-mini',
+      temperature: 0.7,
+    });
+
+    // Define a tool to provide general information about Tamy
+    const getTamyInfo = tool(
+      (input) => {
+        if (input.topic === 'capabilities') {
+          return 'Tamy é um assistente financeiro que pode ajudar com educação financeira, orçamentos, e planejamento financeiro.';
+        } else if (input.topic === 'introduction') {
+          return 'Olá! Sou Tamy, seu assistente financeiro pessoal. Como posso ajudar?';
+        }
+        return 'Tamy é um assistente financeiro projetado para ajudar com suas necessidades financeiras.';
+      },
+      {
+        name: 'get_tamy_info',
+        description: 'Get information about Tamy Financial Assistant',
+        schema: z.object({
+          topic: z
+            .string()
+            .describe(
+              'The topic about Tamy to get information on (capabilities, introduction, etc)',
+            ),
+        }),
+      },
+    );
+
+    // Create the ReAct agent with a language-neutral prompt
+    const customPrompt =
+      'You are Tamy, a friendly and helpful financial assistant. Be polite and professional, but also friendly. Always respond in the same language as the user.';
+
+    this.reactAgent = createReactAgent({
+      llm: model,
+      tools: [getTamyInfo],
+      stateModifier: customPrompt,
+    });
+  }
+
+  /**
+   * Check if we need to create an interruption record
+   */
+  private isInterruptingAnotherProcess(state: OrchestratorState): boolean {
+    // If there's already an interrupted process, we're not creating a new one
+    if (state.memoryContext?.interruptedProcess) {
+      return false;
+    }
+
+    // Check if we're interrupting a registration process
+    if (
+      state.memoryContext?.currentProcess === ProcessType.REGISTRATION &&
+      state.memoryContext?.registrationState?.step !== 'completed'
+    ) {
+      return true;
+    }
+
+    // Not interrupting anything
+    return false;
+  }
+
+  /**
+   * Create an interrupted process record
+   */
+  private createInterruptedProcess(
+    state: OrchestratorState,
+  ): InterruptedProcess | undefined {
+    if (!this.isInterruptingAnotherProcess(state)) {
+      return undefined;
+    }
+
+    // If interrupting registration
+    if (state.memoryContext?.currentProcess === ProcessType.REGISTRATION) {
+      return {
+        type: ProcessType.REGISTRATION,
+        returnToAgent: REGISTRATION_WORKER,
+        originalStep: state.memoryContext.currentStep || '',
+        timestamp: new Date(),
+        data: state.memoryContext.registrationState,
+      };
+    }
+
+    // Add other process types as needed
+
+    return undefined;
+  }
+
+  async handleGeneralInquiry(
+    state: OrchestratorState,
+    config?: RunnableConfig,
+  ): Promise<OrchestratorState> {
+    console.log('🚀 ~ GeneralAssistantWorker ~ config:', config);
+    console.log('🚀 ~ GeneralAssistantWorker ~ state:', state);
+    try {
+      this.logger.debug('Processing general inquiry', {
+        userId: state.userId,
+        threadId: state.threadId,
+        isInterruption: this.isInterruptingAnotherProcess(state),
+      });
+
+      // Check if we're interrupting another process and create a record if needed
+      const interruptedProcess = this.createInterruptedProcess(state);
+      const isTemporaryDiversion = !!interruptedProcess;
+
+      // Map state messages to format expected by ReAct agent
+      const messages = state.messages.map((msg) => ({
+        role: msg._getType() === 'human' ? 'user' : 'assistant',
+        content: msg.content,
+      }));
+
+      // Add language context as a system message if available
+      if (state.memoryContext?.preferredLanguage) {
+        messages.unshift({
+          role: 'system',
+          content: `The user is communicating in ${state.memoryContext.preferredLanguage.name} (${state.memoryContext.preferredLanguage.code}). Please respond in the same language.`,
+        });
+      }
+
+      // Use the ReAct agent to generate a response
+      const result = await this.reactAgent.invoke(
+        { messages },
+        {
+          ...config,
+        },
+      );
+
+      // Extract the latest assistant message
+      const aiMessage = new AIMessage({
+        content: result.messages[result.messages.length - 1]?.content!,
+      });
+
+      // Prepare the updated memory context
+      const updatedMemoryContext: MemoryContext = {
+        // Required properties
+        relevantHistory: state.memoryContext?.relevantHistory || '',
+        lastInteraction: new Date(),
+        currentStep: isTemporaryDiversion
+          ? state.memoryContext?.currentStep || ''
+          : 'general_assistant',
+
+        // Optional properties
+        summary: state.memoryContext?.summary,
+        registrationState: state.memoryContext?.registrationState,
+
+        // Store the interrupted process info if we're interrupting something
+        interruptedProcess,
+
+        // Set current process only if we're not just temporarily diverting
+        currentProcess: isTemporaryDiversion
+          ? state.memoryContext?.currentProcess
+          : ProcessType.GENERAL_ASSISTANT,
+
+        // Track the diversion
+        lastDiversion: isTemporaryDiversion
+          ? {
+              from: state.memoryContext?.currentProcess || '',
+              to: ProcessType.GENERAL_ASSISTANT,
+              timestamp: new Date(),
+            }
+          : state.memoryContext?.lastDiversion,
+      };
+
+      // Return updated state with the new message
+      return {
+        ...state,
+        messages: [...state.messages, aiMessage],
+        next: OUTPUT_SANITIZER,
+        metadata: {
+          ...state.metadata,
+          lastNode: GENERAL_ASSISTANT_WORKER,
+          temporaryDiversion: isTemporaryDiversion,
+        },
+        memoryContext: updatedMemoryContext,
+      };
+    } catch (error) {
+      this.logger.error('Error in general assistant worker', error);
+
+      // Create a default message when we hit an error
+      const defaultResponse =
+        'Olá! Tudo bem com você? Como posso ajudar com suas questões financeiras hoje?';
+      const aiMessage = new AIMessage({
+        content: defaultResponse,
+      });
+
+      // Create proper memory context with required properties
+      const errorMemoryContext: MemoryContext = {
+        // Required properties
+        relevantHistory: state.memoryContext?.relevantHistory || '',
+        currentStep: state.memoryContext?.currentStep || 'general_assistant',
+        lastInteraction: new Date(),
+
+        // Preserve existing properties
+        summary: state.memoryContext?.summary,
+        registrationState: state.memoryContext?.registrationState,
+        currentProcess: state.memoryContext?.currentProcess,
+        interruptedProcess: state.memoryContext?.interruptedProcess,
+        lastDiversion: state.memoryContext?.lastDiversion,
+      };
+
+      return {
+        ...state,
+        messages: [...state.messages, aiMessage],
+        metadata: {
+          ...state.metadata,
+          lastError: `General assistant error: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+          lastNode: GENERAL_ASSISTANT_WORKER,
+        },
+        next: ERROR_HANDLER,
+        memoryContext: errorMemoryContext,
+      };
+    }
+  }
+
+  private async updateMemoryContext(state: OrchestratorState): Promise<void> {
+    // Update memory context with current process and step
+    state.memoryContext = {
+      // Required properties
+      relevantHistory: state.memoryContext?.relevantHistory || '',
+      currentProcess: ProcessType.GENERAL_ASSISTANT,
+      currentStep: state.memoryContext?.currentStep || 'general_assistant',
+      lastInteraction: new Date(),
+      // Optional properties
+      preferredLanguage: state.memoryContext?.preferredLanguage,
+      summary: state.memoryContext?.summary,
+      registrationState: state.memoryContext?.registrationState,
+      interruptedProcess: state.memoryContext?.interruptedProcess,
+      lastDiversion: state.memoryContext?.lastDiversion,
+    };
+  }
+}
+
+
+// orchestrator-pattern/sanitizers/index.ts
+
+import { Module } from '@nestjs/common';
+import { InputSanitizerService } from './input-sanitizer';
+import { OutputSanitizerService } from './output-sanitizer';
+import { LanguageService } from '../services/language.service';
+
+@Module({
+  providers: [InputSanitizerService, OutputSanitizerService, LanguageService],
+  exports: [InputSanitizerService, OutputSanitizerService],
+})
+export class SanitizersModule {}
+
+export * from './input-sanitizer';
+export * from './output-sanitizer';
+
+
+// orchestrator-pattern/sanitizers/output-sanitizer.ts
+
+import { Injectable, Logger } from '@nestjs/common';
+import { OrchestratorState, ORCHESTRATOR, ERROR_HANDLER } from '../types';
+import { AIMessage, isAIMessage } from '@langchain/core/messages';
+import { END } from '@langchain/langgraph';
+import { ProcessType } from '../types';
+
+@Injectable()
+export class OutputSanitizerService {
+  private readonly logger = new Logger(OutputSanitizerService.name);
+
+  async sanitizeOutput(state: OrchestratorState): Promise<OrchestratorState> {
+    try {
+      this.logger.debug('Sanitizing output', {
+        userId: state.userId,
+        threadId: state.threadId,
+        fromNode: state.metadata.lastNode,
+      });
+
+      // Check if there are any messages to sanitize
+      if (state.messages.length === 0) {
+        return {
+          ...state,
+          metadata: {
+            ...state.metadata,
+            outputValidated: true,
+            lastNode: 'output_sanitizer',
+          },
+          next: END, // Always end the conversation
+        };
+      }
+
+      // Get the last message (should be from AI)
+      const lastMessage = state.messages[state.messages.length - 1];
+      console.log('🚀 ~ OutputSanitizerService ~ lastMessage:', lastMessage);
+      console.log(
+        '🚀 ~ OutputSanitizerService ~ state.messages:',
+        state.messages,
+      );
+      if (!isAIMessage(lastMessage!)) {
+        this.logger.warn('Last message is not from AI', {
+          messageType: lastMessage?.constructor?.name,
+        });
+        return {
+          ...state,
+          metadata: {
+            ...state.metadata,
+            outputValidated: true,
+            lastNode: 'output_sanitizer',
+          },
+          next: END, // Always end the conversation
+        };
+      }
+
+      // Extract message content
+      const content =
+        typeof lastMessage.content === 'string'
+          ? lastMessage.content
+          : JSON.stringify(lastMessage.content);
+
+      // Validate and sanitize
+      const sanitizedContent = this.validateAndSanitize(content);
+
+      // Check if content needed sanitization
+      if (sanitizedContent !== content) {
+        this.logger.debug('AI output sanitized', {
+          original: content,
+          sanitized: sanitizedContent,
+        });
+
+        // Replace the message with sanitized content
+        state.messages[state.messages.length - 1] = new AIMessage({
+          content: sanitizedContent,
+          name: lastMessage.name,
+        });
+      }
+
+      // Determine if we should end the conversation or return to orchestrator
+      // Check if we need to continue the conversation or if this is a final response
+      const shouldEndConversation = this.shouldEndConversation(state);
+
+      this.logger.debug(
+        `Sanitization complete, ${shouldEndConversation ? 'ending conversation' : 'returning to orchestrator'}`,
+        { currentProcess: state.memoryContext?.currentProcess },
+      );
+
+      return {
+        ...state,
+        metadata: {
+          ...state.metadata,
+          outputValidated: true,
+          lastNode: 'output_sanitizer',
+        },
+        next: END, // Always end the conversation after output sanitizer
+      };
+    } catch (error) {
+      this.logger.error('Error sanitizing output', error);
+      return {
+        ...state,
+        metadata: {
+          ...state.metadata,
+          lastError: `Output sanitization error: ${error instanceof Error ? error.message : String(error)}`,
+          lastNode: 'output_sanitizer',
+        },
+        next: END, // End the conversation even on error
+      };
+    }
+  }
+
+  /**
+   * Determines if we should end the conversation based on the current state
+   * This prevents loops between orchestrator and workers
+   */
+  private shouldEndConversation(state: OrchestratorState): boolean {
+    // If there's no need to maintain an ongoing conversation, end it
+    // Check for signs that we've completed a conversation cycle
+
+    // Check if this is a general assistant query that doesn't need follow-up
+    if (
+      state.memoryContext?.currentProcess === ProcessType.GENERAL_ASSISTANT &&
+      !state.memoryContext?.interruptedProcess
+    ) {
+      // For general assistant queries, we usually end after one response
+      return true;
+    }
+
+    // For other processes like registration or financial education,
+    // we usually want to continue unless explicitly marked complete
+
+    // Check if we're coming from a worker and have already sanitized output
+    const fromWorker = state.metadata?.lastNode?.includes('worker');
+    const alreadyProcessed = state.metadata?.outputValidated === true;
+
+    // If we've already been through a worker and then sanitized, probably time to end
+    if (fromWorker && alreadyProcessed) {
+      return true;
+    }
+
+    // Continue conversation for registration process or if there's an interrupted process
+    return false;
+  }
+
+  private validateAndSanitize(content: string): string {
+    // Remove any dangerous HTML/script
+    let sanitized = content.replace(
+      /<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi,
+      '',
+    );
+
+    // Check for and redact sensitive information patterns
+    // Redact phone numbers
+    sanitized = sanitized.replace(
+      /(\+\d{1,3}[ -]?)?\(?\d{3}\)?[ -]?\d{3}[ -]?\d{4}/g,
+      '[PHONE REDACTED]',
+    );
+
+    // Redact email addresses
+    sanitized = sanitized.replace(
+      /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g,
+      '[EMAIL REDACTED]',
+    );
+
+    // Redact credit card numbers
+    sanitized = sanitized.replace(
+      /\b(?:\d{4}[ -]?){3}\d{4}\b/g,
+      '[CREDIT CARD REDACTED]',
+    );
+
+    // Ensure the response doesn't claim to have abilities it doesn't
+    const falseClaimPatterns = [
+      /I can access your bank account/i,
+      /I can make financial transactions for you/i,
+      /I can invest your money/i,
+    ];
+
+    for (const pattern of falseClaimPatterns) {
+      if (pattern.test(sanitized)) {
+        sanitized = sanitized.replace(
+          pattern,
+          '[CORRECTION: I cannot do this as I am an AI assistant]',
+        );
+      }
+    }
+
+    return sanitized;
+  }
+
+  private shouldSkipSanitization(state: OrchestratorState): boolean {
+    // Skip sanitization for general assistant process
+    return (
+      state.memoryContext?.currentProcess === ProcessType.GENERAL_ASSISTANT &&
+      !state.metadata?.temporaryDiversion
+    );
+  }
+}
+
+
+// orchestrator-pattern/agents/financial-coach.agent.ts
+
+import { AIMessage } from '@langchain/core/messages';
+import { RunnableConfig } from '@langchain/core/runnables';
+import { tool } from '@langchain/core/tools';
+import { createReactAgent } from '@langchain/langgraph/prebuilt';
+import { ChatOpenAI } from '@langchain/openai';
+import { Injectable, Logger } from '@nestjs/common';
+import { z } from 'zod';
+import {
+  FINANCIAL_COACH_WORKER,
+  InterruptedProcess,
+  MemoryContext,
+  OrchestratorState,
+  OUTPUT_SANITIZER,
+  ProcessType,
+  REGISTRATION_WORKER
+} from '../types';
+
+@Injectable()
+export class FinancialCoachWorker {
+  private readonly logger = new Logger(FinancialCoachWorker.name);
+  private reactAgent;
+
+  constructor() {
+    const model = new ChatOpenAI({
+      modelName: 'gpt-4o-mini',
+      temperature: 0.3,
+    });
+
+    // Create tools for financial education
+    const getInvestmentInfo = tool(
+      (input) => {
+        if (input.topic === 'cdb') {
+          return 'CDB (Certificado de Depósito Bancário) é um título de renda fixa emitido por bancos como forma de captação de recursos. O investidor empresta dinheiro ao banco e recebe juros sobre esse valor.';
+        } else if (input.topic === 'tesouro_direto') {
+          return 'Tesouro Direto é um programa do governo brasileiro que permite a compra de títulos públicos por pessoas físicas. É considerado um investimento seguro porque o pagamento é garantido pelo Tesouro Nacional.';
+        } else if (input.topic === 'acoes') {
+          return 'Ações são pequenas partes de uma empresa que são negociadas na bolsa de valores. Ao comprar ações, você se torna sócio da empresa e pode receber dividendos e lucrar com a valorização das ações.';
+        } else if (input.topic === 'fundos_imobiliarios') {
+          return 'Fundos Imobiliários (FIIs) são investimentos em que um grupo de investidores reúne recursos para aplicar em empreendimentos imobiliários. Os rendimentos vêm do aluguel desses imóveis e são distribuídos mensalmente.';
+        }
+        return 'Este é um tipo de investimento comum no Brasil. Para informações mais específicas, por favor pergunte sobre um tipo específico.';
+      },
+      {
+        name: 'get_investment_info',
+        description: 'Get information about different investment types',
+        schema: z.object({
+          topic: z
+            .string()
+            .describe(
+              'The investment topic to get information on (cdb, tesouro_direto, acoes, fundos_imobiliarios, etc)',
+            ),
+        }),
+      },
+    );
+
+    const getFinancialConcept = tool(
+      (input) => {
+        if (input.concept === 'juros_compostos') {
+          return 'Juros compostos é quando os juros de um período são adicionados ao capital para o cálculo dos juros do período seguinte. Isso cria um efeito de "bola de neve" que acelera o crescimento do dinheiro ao longo do tempo.';
+        } else if (input.concept === 'diversificacao') {
+          return 'Diversificação é a estratégia de dividir investimentos entre diferentes tipos de ativos para reduzir o risco. Assim, se um investimento tiver desempenho ruim, outros podem compensar, reduzindo perdas no total.';
+        } else if (input.concept === 'inflacao') {
+          return 'Inflação é o aumento generalizado e contínuo dos preços de bens e serviços. Ela reduz o poder de compra do dinheiro ao longo do tempo, tornando importante que investimentos superem a inflação para preservar o valor real do capital.';
+        }
+        return 'Este é um conceito financeiro importante. Para informações mais específicas, por favor pergunte sobre um conceito específico.';
+      },
+      {
+        name: 'get_financial_concept',
+        description: 'Get explanations of financial concepts',
+        schema: z.object({
+          concept: z
+            .string()
+            .describe(
+              'The financial concept to explain (juros_compostos, diversificacao, inflacao, etc)',
+            ),
+        }),
+      },
+    );
+
+    // Replace the Portuguese-specific instructions
+    const customPrompt = `You are a financial expert who works as a coach for Tamy Finance. Your role is to provide accurate financial education and guidance to users.
+
+Key responsibilities:
+1. Explain financial concepts with clarity and precision
+2. Provide educational guidance on financial products and services
+3. Answer questions about personal finance, investments, and savings
+4. Maintain an educational rather than prescriptive focus - help users understand concepts
+
+Important guidelines:
+- Maintain a friendly, clear, and educational tone
+- Explain concepts without jargon when possible
+- If you're unsure about something, openly acknowledge it
+- Don't provide specific investment advice
+- Focus on general financial education
+- Always respond in the same language as the user
+
+Areas of expertise:
+- Basic personal finance concepts
+- Savings and investment vehicles
+- Debt management
+- Budgeting principles
+- Financial terminology
+- General market concepts`;
+
+    // Create the ReAct agent
+    this.reactAgent = createReactAgent({
+      llm: model,
+      tools: [getInvestmentInfo, getFinancialConcept],
+      stateModifier: customPrompt,
+    });
+  }
+
+  /**
+   * Check if we need to create an interruption record
+   */
+  private isInterruptingAnotherProcess(state: OrchestratorState): boolean {
+    // If there's already an interrupted process, we're not creating a new one
+    if (state.memoryContext?.interruptedProcess) {
+      return false;
+    }
+
+    // Check if we're interrupting a registration process
+    if (
+      state.memoryContext?.currentProcess === ProcessType.REGISTRATION &&
+      state.memoryContext?.registrationState?.step !== 'completed'
+    ) {
+      return true;
+    }
+
+    // Not interrupting anything
+    return false;
+  }
+
+  /**
+   * Create an interrupted process record
+   */
+  private createInterruptedProcess(
+    state: OrchestratorState,
+  ): InterruptedProcess | undefined {
+    if (!this.isInterruptingAnotherProcess(state)) {
+      return undefined;
+    }
+
+    // If interrupting registration
+    if (state.memoryContext?.currentProcess === ProcessType.REGISTRATION) {
+      return {
+        type: ProcessType.REGISTRATION,
+        returnToAgent: REGISTRATION_WORKER,
+        originalStep: state.memoryContext.currentStep || '',
+        timestamp: new Date(),
+        data: state.memoryContext.registrationState,
+      };
+    }
+
+    // Add other process types as needed
+
+    return undefined;
+  }
+
+  async provideFinancialEducation(
+    state: OrchestratorState,
+    config?: RunnableConfig,
+  ): Promise<OrchestratorState> {
+    try {
+      this.logger.debug('Providing financial education', {
+        userId: state.userId,
+        threadId: state.threadId,
+        isInterruption: this.isInterruptingAnotherProcess(state),
+      });
+
+      // Skip if no messages
+      if (state.messages.length === 0) {
+        return {
+          ...state,
+          metadata: {
+            ...state.metadata,
+            lastNode: FINANCIAL_COACH_WORKER,
+          },
+          next: OUTPUT_SANITIZER,
+        };
+      }
+
+      // Check if we're interrupting another process and create a record if needed
+      const interruptedProcess = this.createInterruptedProcess(state);
+      const isTemporaryDiversion = !!interruptedProcess;
+
+      // Map state messages to format expected by ReAct agent
+      const messages = state.messages.map((msg) => ({
+        role: msg._getType() === 'human' ? 'user' : 'assistant',
+        content: msg.content,
+      }));
+
+      // Add language context as a system message if available
+      if (state.memoryContext?.preferredLanguage) {
+        messages.unshift({
+          role: 'system',
+          content: `The user is communicating in ${state.memoryContext.preferredLanguage.name} (${state.memoryContext.preferredLanguage.code}). Please respond in the same language.`,
+        });
+      }
+
+      // Use the ReAct agent to generate a response
+      const result = await this.reactAgent.invoke(
+        { messages },
+        {
+          ...config,
+        },
+      );
+
+      // Extract the latest assistant message
+      const aiMessage = new AIMessage({
+        content: result.messages[result.messages.length - 1]?.content!,
+        name: 'FinancialCoach',
+      });
+
+      // Prepare the updated memory context
+      const updatedMemoryContext: MemoryContext = {
+        // Required properties must be included and properly typed
+        relevantHistory: state.memoryContext?.relevantHistory || '',
+        lastInteraction: new Date(),
+        currentStep: isTemporaryDiversion
+          ? state.memoryContext?.currentStep || ''
+          : 'financial_education',
+
+        // Optional properties
+        summary: state.memoryContext?.summary,
+        registrationState: state.memoryContext?.registrationState,
+
+        // Store the interrupted process info if we're interrupting something
+        interruptedProcess,
+
+        // Set current process only if we're not just temporarily diverting
+        currentProcess: isTemporaryDiversion
+          ? state.memoryContext?.currentProcess
+          : ProcessType.FINANCIAL_EDUCATION,
+
+        // Track the diversion
+        lastDiversion: isTemporaryDiversion
+          ? {
+              from: state.memoryContext?.currentProcess || '',
+              to: ProcessType.FINANCIAL_EDUCATION,
+              timestamp: new Date(),
+            }
+          : state.memoryContext?.lastDiversion,
+      };
+
+      // Return updated state with the new message
+      return {
+        ...state,
+        messages: [...state.messages, aiMessage],
+        metadata: {
+          ...state.metadata,
+          lastNode: FINANCIAL_COACH_WORKER,
+          // If we were in registration, preserve the step
+          registrationStep: state.metadata.registrationStep,
+          // Flag if this is a temporary diversion
+          temporaryDiversion: isTemporaryDiversion,
+        },
+        next: OUTPUT_SANITIZER,
+        memoryContext: updatedMemoryContext,
+      };
+    } catch (error) {
+      this.logger.error('Error in financial coach worker', error);
+
+      // Create a default message when we hit an error
+      const defaultResponse =
+        'Desculpe, estou tendo dificuldades para processar sua pergunta sobre finanças. Poderia reformular ou fazer outra pergunta sobre educação financeira?';
+      const aiMessage = new AIMessage({
+        content: defaultResponse,
+        name: 'FinancialCoach',
+      });
+
+      // Create proper memory context with required properties
+      const errorMemoryContext: MemoryContext = {
+        // Required properties
+        relevantHistory: state.memoryContext?.relevantHistory || '',
+        currentStep: state.memoryContext?.currentStep || 'financial_education',
+        lastInteraction: new Date(),
+
+        // Preserve existing properties
+        summary: state.memoryContext?.summary,
+        registrationState: state.memoryContext?.registrationState,
+        currentProcess: state.memoryContext?.currentProcess,
+        interruptedProcess: state.memoryContext?.interruptedProcess,
+        lastDiversion: state.memoryContext?.lastDiversion,
+      };
+
+      return {
+        ...state,
+        messages: [...state.messages, aiMessage],
+        metadata: {
+          ...state.metadata,
+          lastError: `Financial coach error: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+          lastNode: FINANCIAL_COACH_WORKER,
+        },
+        next: OUTPUT_SANITIZER,
+        memoryContext: errorMemoryContext,
+      };
+    }
+  }
+}
+
+
+// orchestrator-pattern/sanitizers/input-sanitizer.ts
+
+import { Injectable, Logger } from '@nestjs/common';
+import { OrchestratorState, ORCHESTRATOR, ERROR_HANDLER } from '../types';
+import { HumanMessage } from '@langchain/core/messages';
+import { LanguageService } from '../services/language.service';
+import { ProcessType } from '../types';
+
+@Injectable()
+export class InputSanitizerService {
+  private readonly logger = new Logger(InputSanitizerService.name);
+
+  constructor(private readonly languageService: LanguageService) {}
+
+  async sanitizeInput(state: OrchestratorState): Promise<OrchestratorState> {
+    try {
+      this.logger.debug('Sanitizing input', {
+        userId: state.userId,
+        threadId: state.threadId,
+      });
+
+      // Always ensure memory context has required fields
+      if (!state.memoryContext) {
+        state.memoryContext = {
+          relevantHistory: '',
+          currentProcess: ProcessType.GENERAL_ASSISTANT,
+          currentStep: 'general_assistant',
+          lastInteraction: new Date(),
+        };
+      } else {
+        // Ensure required fields are set if memoryContext exists but is incomplete
+        if (!state.memoryContext.currentProcess) {
+          state.memoryContext.currentProcess = ProcessType.GENERAL_ASSISTANT;
+        }
+        if (!state.memoryContext.currentStep) {
+          state.memoryContext.currentStep = 'general_assistant';
+        }
+        if (!state.memoryContext.lastInteraction) {
+          state.memoryContext.lastInteraction = new Date();
+        }
+        if (!state.memoryContext.relevantHistory) {
+          state.memoryContext.relevantHistory = '';
+        }
+      }
+
+      // Skip if no messages or already validated
+      if (state.messages.length === 0 || state.metadata.inputValidated) {
+        return {
+          ...state,
+          metadata: {
+            ...state.metadata,
+            inputValidated: true,
+            lastNode: 'input_sanitizer',
+          },
+          next: ORCHESTRATOR,
+        };
+      }
+
+      // Get the last message (should be from human)
+      const lastMessage = state.messages[state.messages.length - 1];
+      if (!(lastMessage instanceof HumanMessage)) {
+        this.logger.warn('Last message is not from human', {
+          messageType: lastMessage?.constructor?.name,
+        });
+        return {
+          ...state,
+          metadata: {
+            ...state.metadata,
+            inputValidated: true,
+            lastNode: 'input_sanitizer',
+          },
+          next: ORCHESTRATOR,
+        };
+      }
+
+      // Detect language if we haven't already done so
+      if (
+        lastMessage instanceof HumanMessage &&
+        typeof lastMessage.content === 'string' &&
+        (!state.memoryContext?.preferredLanguage ||
+          new Date().getTime() -
+            new Date(
+              state.memoryContext.preferredLanguage.lastDetected,
+            ).getTime() >
+            3600000) // Re-detect after 1 hour
+      ) {
+        const languageInfo = await this.languageService.detectLanguage(
+          lastMessage.content,
+        );
+
+        // Add language preference to memory context (we know it exists now)
+        state.memoryContext.preferredLanguage = {
+          code: languageInfo.languageCode,
+          name: languageInfo.languageName,
+          lastDetected: new Date(),
+        };
+
+        this.logger.debug(
+          `Detected language: ${languageInfo.languageName} (${languageInfo.languageCode})`,
+          {
+            confidence: languageInfo.confidence,
+            threadId: state.threadId,
+          },
+        );
+      }
+
+      // Extract message content
+      const content =
+        typeof lastMessage.content === 'string'
+          ? lastMessage.content
+          : JSON.stringify(lastMessage.content);
+
+      // Basic validation and sanitization
+      const sanitizedContent = this.validateAndSanitize(content);
+
+      // Check if content needed sanitization
+      if (sanitizedContent !== content) {
+        this.logger.debug('Content sanitized', {
+          original: content,
+          sanitized: sanitizedContent,
+        });
+
+        // Replace the message with sanitized content
+        state.messages[state.messages.length - 1] = new HumanMessage({
+          content: sanitizedContent,
+        });
+      }
+
+      // Deduplicate messages to prevent context size issues
+      state.messages = this.deduplicateMessages(state.messages);
+
+      return {
+        ...state,
+        metadata: {
+          ...state.metadata,
+          inputValidated: true,
+          lastNode: 'input_sanitizer',
+        },
+        next: ORCHESTRATOR,
+      };
+    } catch (error) {
+      this.logger.error('Error sanitizing input', error);
+      return {
+        ...state,
+        metadata: {
+          ...state.metadata,
+          lastError: `Input sanitization error: ${error instanceof Error ? error.message : String(error)}`,
+          lastNode: 'input_sanitizer',
+        },
+        next: ERROR_HANDLER,
+      };
+    }
+  }
+
+  private validateAndSanitize(content: string): string {
+    // Remove any script tags
+    let sanitized = content.replace(
+      /<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi,
+      '',
+    );
+
+    // Remove excessive whitespace
+    sanitized = sanitized.replace(/\s+/g, ' ').trim();
+
+    // Limit length if needed
+    const MAX_LENGTH = 1000;
+    if (sanitized.length > MAX_LENGTH) {
+      sanitized = sanitized.substring(0, MAX_LENGTH) + '...';
+    }
+
+    return sanitized;
+  }
+
+  /**
+   * Removes duplicate messages from the conversation history
+   * This prevents the same message from appearing multiple times and causing context overflow
+   */
+  private deduplicateMessages(messages: any[]): any[] {
+    if (!messages || messages.length <= 1) return messages;
+
+    this.logger.debug(`Deduplicating messages (before: ${messages.length})`);
+
+    // Use a Map to track seen message contents and their indices
+    const messageMap = new Map<string, number>();
+    const uniqueMessages = [];
+
+    // Process messages in reverse order to keep the most recent ones
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i];
+
+      // Extract content based on message type
+      let content = '';
+      let type = '';
+
+      if (message._getType) {
+        // LangChain message
+        type = message._getType();
+        content =
+          typeof message.content === 'string'
+            ? message.content
+            : JSON.stringify(message.content);
+      } else if (message.role) {
+        // OpenAI message format
+        type = message.role;
+        content =
+          typeof message.content === 'string'
+            ? message.content
+            : JSON.stringify(message.content);
+      } else if (message.type) {
+        // Custom message format
+        type = message.type;
+        content =
+          typeof message.content === 'string'
+            ? message.content
+            : message.text || JSON.stringify(message.content);
+      }
+
+      // Create a key combining type and content
+      const key = `${type}:${content}`;
+
+      // Only add if we haven't seen this exact message before
+      if (!messageMap.has(key)) {
+        messageMap.set(key, i);
+        uniqueMessages.unshift(message); // Add to front since we're going backwards
+      }
+    }
+
+    this.logger.debug(
+      `Deduplication complete (after: ${uniqueMessages.length})`,
+    );
+
+    return uniqueMessages;
+  }
+}
+
+
+// orchestrator-pattern/tools/registration.tool.ts
+
+import { Injectable, Logger } from '@nestjs/common';
+import { DynamicStructuredTool } from '@langchain/core/tools';
+import { z } from 'zod';
+import { RegistrationFlowService } from '@/core/integrations/channels/whatsapp/flows/services/registration-flow.service';
+
+@Injectable()
+export class RegistrationTools {
+  private readonly logger = new Logger(RegistrationTools.name);
+
+  constructor(
+    private readonly registrationFlowService: RegistrationFlowService,
+  ) {}
+
+  getAllTools(): DynamicStructuredTool[] {
+    return [this.createSendRegistrationFormTool()];
+  }
+
+  private createSendRegistrationFormTool(): DynamicStructuredTool<any> {
+    return new DynamicStructuredTool({
+      name: 'send_registration_form',
+      description: 'Send a WhatsApp registration form to the user',
+      schema: z.object({
+        phoneNumber: z
+          .string()
+          .describe("User's phone number to send the form to"),
+      }),
+      func: async ({ phoneNumber }) => {
+        try {
+          await this.registrationFlowService.sendRegistrationFlow(phoneNumber);
+
+          return JSON.stringify({
+            success: true,
+            message:
+              'We have sent you a registration form on WhatsApp. Please check your messages and fill in the form to create your account.',
+          });
+        } catch (error) {
+          this.logger.error('Error sending registration form', error);
+          return JSON.stringify({
+            success: false,
+            error: 'Failed to send registration form',
+          });
+        }
+      },
+    });
+  }
+}
+
+
+// orchestrator-pattern/thread/thread.module.ts
+
+import { Module } from '@nestjs/common';
+import { ThreadManagerService } from './thread-manager.service';
+import { RedisModule } from '../../../core/integrations/redis/redis.module';
+
+@Module({
+  imports: [RedisModule],
+  providers: [ThreadManagerService],
+  exports: [ThreadManagerService],
+})
+export class ThreadModule {}
+
+
+// orchestrator-pattern/types/index.ts
+
+import { BaseMessage } from '@langchain/core/messages';
+import { StateGraphArgs, Command, Send } from '@langchain/langgraph';
+import { ChannelType } from '@/core/integrations/channels/channel.interface';
+
+// Registration steps as an enum (for use as values)
+export enum RegistrationSteps {
+  // For the registration flow in tools
+  BASIC_INFO = 'basic_info',
+  PERSONAL_INFO = 'personal_info',
+  CONSENT = 'consent',
+  COMPLETE = 'complete',
+
+  // Original steps
+  COLLECT_NAME = 'collect_name',
+  COLLECT_EMAIL = 'collect_email',
+  COLLECT_BIRTHDATE = 'collect_birthdate',
+  COLLECT_GENDER = 'collect_gender',
+  COLLECT_COUNTRY = 'collect_country',
+  COLLECT_CONSENT = 'collect_consent',
+  CONFIRM = 'confirm',
+  COMPLETED = 'completed',
+  NAME = 'NAME',
+  EMAIL = 'EMAIL',
+  CONFIRMATION = 'CONFIRMATION',
+}
+
+// Process types for keeping track of different flows
+export enum ProcessType {
+  REGISTRATION = 'REGISTRATION',
+  FINANCIAL_EDUCATION = 'FINANCIAL_EDUCATION',
+  GENERAL_ASSISTANT = 'GENERAL_ASSISTANT',
+  // Add more process types as needed
+}
+
+// Enhanced metadata with validation status
+export interface OrchestratorStateMetadata {
+  threadId: string;
+  channelType: ChannelType;
+  userPhone: string;
+  registrationStep?: RegistrationSteps;
+  inputValidated?: boolean;
+  outputValidated?: boolean;
+  lastError?: string;
+  lastNode?: string;
+  routingReason?: string;
+  temporaryDiversion?: boolean; // Flag indicating this is a temporary diversion
+  awaitingUserInput?: boolean;
+  shouldMaintainProcess?: boolean; // Whether to maintain the current process
+  interruptType?:
+    | 'process_exit'
+    | 'registration_exit'
+    | 'name_validation'
+    | 'email_validation'
+    | 'registration_confirmation';
+  validationData?: Record<string, any>;
+  currentProcess?: ProcessType;
+  lastMessage?: string;
+}
+
+// Registration state for multi-step process
+export interface RegistrationState {
+  step: RegistrationSteps; // Updated to use enum
+  name?: string;
+  email?: string;
+  isValid?: boolean;
+  lastValidationError?: string;
+  userId?: string;
+  birthDate?: string;
+  gender?: string;
+  country?: string;
+  termsAccepted?: boolean;
+  marketingConsent?: boolean;
+  confirmed?: boolean;
+  confirmationPresented?: boolean;
+}
+
+// Information about an interrupted process
+export interface InterruptedProcess {
+  type: ProcessType;
+  returnToAgent: string;
+  originalStep: string;
+  timestamp: Date;
+  data?: any;
+}
+
+// Memory context for maintaining history
+export interface ProcessDiversion {
+  from: string;
+  to: string;
+  timestamp: Date;
+}
+
+export interface LanguagePreference {
+  code: string;
+  name: string;
+  lastDetected: Date;
+}
+
+// Memory context interface
+export interface MemoryContext {
+  relevantHistory: string;
+  currentProcess: ProcessType;
+  currentStep: string;
+  lastInteraction: Date;
+  interruptedProcess?: InterruptedProcess;
+  processDiversion?: ProcessDiversion;
+  languagePreference?: LanguagePreference;
+  // Additional properties used across agents
+  registrationState?: RegistrationState;
+  preferredLanguage?: {
+    code: string;
+    name: string;
+    lastDetected: Date;
+  };
+  summary?: string;
+  lastDiversion?: ProcessDiversion;
+}
+
+// Define our main state object
+export interface OrchestratorState {
+  messages: any[];
+  next?: string;
+  userId: string;
+  threadId: string;
+  isRegistered: boolean;
+  metadata: OrchestratorStateMetadata;
+  memoryContext: MemoryContext;
+}
+
+// Define state channels for LangGraph
+export const orchestratorStateChannels: StateGraphArgs<OrchestratorState>['channels'] =
+  {
+    messages: {
+      value: (x?: BaseMessage[], y?: BaseMessage[]) => {
+        // IMPORTANT: We changed from concat approach to replacement approach
+        // This prevents message duplication as state transitions between nodes
+        return y && y.length > 0 ? y : (x ?? []);
+      },
+      default: () => [],
+    },
+    next: {
+      value: (x?: string, y?: string) => y ?? x ?? '',
+      default: () => '',
+    },
+    userId: {
+      value: (x?: string, y?: string) => y ?? x ?? '',
+      default: () => '',
+    },
+    threadId: {
+      value: (x?: string, y?: string) => y ?? x ?? '',
+      default: () => '',
+    },
+    isRegistered: {
+      value: (x?: boolean, y?: boolean) => y ?? x ?? false,
+      default: () => false,
+    },
+    metadata: {
+      value: (
+        x?: OrchestratorStateMetadata,
+        y?: Partial<OrchestratorStateMetadata>,
+      ) => {
+        const defaultValue: OrchestratorStateMetadata = {
+          threadId: '',
+          channelType: ChannelType.WHATSAPP,
+          userPhone: '',
+          inputValidated: false,
+          outputValidated: false,
+        };
+        return {
+          ...defaultValue,
+          ...(x || {}),
+          ...(y || {}),
+        } as OrchestratorStateMetadata;
+      },
+      default: () => ({
+        threadId: '',
+        channelType: ChannelType.WHATSAPP,
+        userPhone: '',
+        inputValidated: false,
+        outputValidated: false,
+      }),
+    },
+    memoryContext: {
+      value: (x?: MemoryContext, y?: Partial<MemoryContext>) => {
+        const defaultValue: MemoryContext = {
+          relevantHistory: '',
+          currentProcess: ProcessType.GENERAL_ASSISTANT,
+          currentStep: 'general_assistant',
+          lastInteraction: new Date(),
+        };
+        return {
+          ...defaultValue,
+          ...(x || {}),
+          ...(y || {}),
+        } as MemoryContext;
+      },
+      default: () => ({
+        relevantHistory: '',
+        currentProcess: ProcessType.GENERAL_ASSISTANT,
+        currentStep: 'general_assistant',
+        lastInteraction: new Date(),
+      }),
+    },
+  };
+
+// Available graph nodes
+export const ORCHESTRATOR = 'orchestrator';
+export const INPUT_SANITIZER = 'input_sanitizer';
+export const OUTPUT_SANITIZER = 'output_sanitizer';
+export const REGISTRATION_WORKER = 'registration_worker';
+export const FINANCIAL_COACH_WORKER = 'financial_coach_worker';
+export const GENERAL_ASSISTANT_WORKER = 'general_assistant_worker';
+export const ERROR_HANDLER = 'error_handler';
+
+// Common node type
+export type OrchestratorNodes =
+  | typeof ORCHESTRATOR
+  | typeof INPUT_SANITIZER
+  | typeof OUTPUT_SANITIZER
+  | typeof REGISTRATION_WORKER
+  | typeof FINANCIAL_COACH_WORKER
+  | typeof GENERAL_ASSISTANT_WORKER
+  | typeof ERROR_HANDLER;
+
+export interface RoutingDecision {
+  routeTo: string;
+  reasoning: string;
+}
+
+// Command types for interrupts
+export interface InterruptCommand extends Command<unknown> {
+  type: 'interrupt';
+  value: {
+    message: string;
+    requiresConfirmation: boolean;
+    processType?: ProcessType;
+    step?: string;
+  };
+  metadata?: {
+    originalProcess?: ProcessType;
+    originalStep?: string;
+    timestamp: Date;
+  };
+  update?: [string, any][] | Record<string, any>;
+  resume?: unknown;
+  goto: string | Send | (string | Send)[];
+  lg_name: string;
+  lc_direct_tool_output: boolean;
+  _updateAsTuples: () => [string, unknown][];
+  toJSON(): {
+    update: Record<string, unknown> | [string, unknown][] | undefined;
+    resume: unknown;
+    goto:
+      | string
+      | { node: string; args: any }
+      | (string | { node: string; args: any })[];
+  };
+}
+
+export interface ResumeCommand extends Command<unknown> {
+  type: 'resume';
+  value: {
+    confirmed: boolean;
+    userInput?: string;
+    processType: ProcessType;
+    step: string;
+  };
+  metadata?: {
+    timestamp: Date;
+  };
+  update?: [string, any][] | Record<string, any>;
+  resume?: unknown;
+  goto: string | Send | (string | Send)[];
+  lg_name: string;
+  lc_direct_tool_output: boolean;
+  _updateAsTuples: () => [string, unknown][];
+  toJSON(): {
+    update: Record<string, unknown> | [string, unknown][] | undefined;
+    resume: unknown;
+    goto:
+      | string
+      | { node: string; args: any }
+      | (string | { node: string; args: any })[];
+  };
+}
+
+// Helper functions for creating commands
+export function createInterruptCommand(
+  message: string,
+  requiresConfirmation: boolean,
+  processType?: ProcessType,
+  step?: string,
+  originalProcess?: ProcessType,
+  originalStep?: string,
+): InterruptCommand {
+  return {
+    type: 'interrupt',
+    value: {
+      message,
+      requiresConfirmation,
+      processType,
+      step,
+    },
+    metadata: {
+      originalProcess,
+      originalStep,
+      timestamp: new Date(),
+    },
+    update: [],
+    resume: undefined,
+    goto: '',
+    lg_name: 'interrupt',
+    lc_direct_tool_output: false,
+    _updateAsTuples: () => [],
+    toJSON() {
+      return {
+        update: this.update,
+        resume: this.resume,
+        goto: this.goto,
+      };
+    },
+  };
+}
+
+export function createResumeCommand(
+  confirmed: boolean,
+  userInput?: string,
+  processType?: ProcessType,
+  step?: string,
+): ResumeCommand {
+  const finalProcessType = processType || ProcessType.GENERAL_ASSISTANT;
+  const finalStep = step || 'general_assistant';
+
+  return {
+    type: 'resume',
+    value: {
+      confirmed,
+      userInput,
+      processType: finalProcessType,
+      step: finalStep,
+    },
+    metadata: {
+      timestamp: new Date(),
+    },
+    update: [],
+    resume: undefined,
+    goto: '',
+    lg_name: 'resume',
+    lc_direct_tool_output: false,
+    _updateAsTuples: () => [],
+    toJSON() {
+      return {
+        update: this.update,
+        resume: this.resume,
+        goto: this.goto,
+      };
+    },
+  };
+}
+
+// Default memory context factory
+export function createDefaultMemoryContext(
+  processType: ProcessType = ProcessType.GENERAL_ASSISTANT,
+  step: string = 'general_assistant',
+): MemoryContext {
+  return {
+    relevantHistory: '',
+    currentProcess: processType,
+    currentStep: step,
+    lastInteraction: new Date(),
+  };
+}
+
+// Update getInitialMemoryContext to use the new factory
+export function getInitialMemoryContext(): MemoryContext {
+  return createDefaultMemoryContext();
+}
+
+// Type guards for safer state access
+export function isRegistrationState(
+  value: unknown,
+): value is RegistrationState {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'step' in value &&
+    typeof (value as RegistrationState).step === 'string'
+  );
+}
+
+export function hasRegistrationState(
+  context: MemoryContext,
+): context is MemoryContext & { registrationState: RegistrationState } {
+  return (
+    'registrationState' in context &&
+    isRegistrationState(context.registrationState)
+  );
+}
+
+export function hasPreferredLanguage(
+  context: MemoryContext,
+): context is MemoryContext & {
+  preferredLanguage: { code: string; name: string; lastDetected: Date };
+} {
+  return (
+    'preferredLanguage' in context &&
+    typeof context.preferredLanguage === 'object' &&
+    context.preferredLanguage !== null &&
+    'code' in context.preferredLanguage &&
+    'name' in context.preferredLanguage &&
+    'lastDetected' in context.preferredLanguage
+  );
+}
+
+export function isInterruptedProcess(
+  value: unknown,
+): value is InterruptedProcess {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'type' in value &&
+    'returnToAgent' in value &&
+    'originalStep' in value &&
+    'timestamp' in value
+  );
+}
+
+export function hasInterruptedProcess(
+  context: MemoryContext,
+): context is MemoryContext & { interruptedProcess: InterruptedProcess } {
+  return (
+    'interruptedProcess' in context &&
+    isInterruptedProcess(context.interruptedProcess)
+  );
+}
+
+
+// orchestrator-pattern/thread/thread-manager.service.ts
+
+import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { RedisService } from '../../../core/integrations/redis/redis.service';
+import { ChannelType } from '../../../core/integrations/channels/channel.interface';
+
+export interface ThreadMetadata {
+  threadId: string;
+  userPhone: string;
+  channelType: string;
+  lastInteraction: number;
+  messageCount: number;
+}
+
+@Injectable()
+export class ThreadManagerService {
+  private readonly logger = new Logger(ThreadManagerService.name);
+  private readonly defaultTTL: number;
+  private readonly MAX_SAFE_MESSAGE_COUNT = 30; // Set a safe limit well below OpenAI's maximum
+
+  constructor(
+    private readonly redisService: RedisService,
+    private readonly configService: ConfigService,
+  ) {
+    this.defaultTTL = this.configService.get<number>('THREAD_TTL', 86400); // 24 hours
+  }
+
+  /**
+   * Get a value from Redis
+   * @param key The key to get
+   * @returns The value if found, null otherwise
+   */
+  async get(key: string): Promise<string | null> {
+    try {
+      return await this.redisService.get(key);
+    } catch (error) {
+      this.logger.error(`Error getting key ${key}:`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Set a value in Redis with optional TTL
+   * @param key The key to set
+   * @param value The value to set
+   * @param ttl Optional TTL in seconds
+   */
+  async set(key: string, value: string, ttl?: number): Promise<void> {
+    try {
+      await this.redisService.set(key, value, ttl || this.defaultTTL);
+    } catch (error) {
+      this.logger.error(`Error setting key ${key}:`, error);
+    }
+  }
+
+  /**
+   * Get or create a thread ID for a user
+   * @param userPhone The user's phone number
+   * @param channelType The channel type
+   * @returns The thread ID
+   */
+  async getOrCreateThreadId(
+    userPhone: string,
+    channelType: ChannelType,
+  ): Promise<string> {
+    const key = `thread:${userPhone}:${channelType}`;
+
+    try {
+      // Try to get existing thread ID
+      const existingId = await this.get(key);
+      if (existingId) {
+        return existingId;
+      }
+
+      // Create new thread ID
+      const newId = `${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
+      await this.set(key, newId);
+
+      return newId;
+    } catch (error) {
+      this.logger.error('Error managing thread ID:', error);
+      // Fallback to temporary thread ID if Redis fails
+      return `temp-${Date.now()}`;
+    }
+  }
+
+  /**
+   * Increment the message count for a thread and reset if needed
+   * @param threadId The thread ID
+   * @param messageCount Current number of messages in the thread
+   * @returns New threadId if reset was needed, original threadId otherwise
+   */
+  async checkAndResetThreadIfNeeded(
+    userPhone: string,
+    channelType: ChannelType,
+    messageCount: number,
+  ): Promise<string> {
+    const key = `thread:${userPhone}:${channelType}`;
+
+    // If message count is below the safe threshold, no action needed
+    if (messageCount < this.MAX_SAFE_MESSAGE_COUNT) {
+      return await this.getOrCreateThreadId(userPhone, channelType);
+    }
+
+    try {
+      this.logger.warn(
+        `Thread message count (${messageCount}) exceeds safe limit (${this.MAX_SAFE_MESSAGE_COUNT}). Resetting thread.`,
+        {
+          userPhone,
+          channelType,
+        },
+      );
+
+      // Reset by creating a new thread ID
+      const newThreadId = `${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
+
+      // Store metadata about the reset for debugging
+      const resetKey = `thread_reset:${userPhone}:${Date.now()}`;
+      const resetInfo = JSON.stringify({
+        oldThreadId: await this.get(key),
+        newThreadId,
+        messageCount,
+        resetTimestamp: Date.now(),
+      });
+
+      await this.redisService.set(resetKey, resetInfo, 86400 * 7); // Keep reset info for 7 days
+
+      // Update the thread ID
+      await this.set(key, newThreadId);
+
+      this.logger.log(`Thread reset successful. New ID: ${newThreadId}`, {
+        userPhone,
+        channelType,
+      });
+
+      return newThreadId;
+    } catch (error) {
+      this.logger.error('Error resetting thread:', error);
+      // Return existing ID on error
+      return await this.getOrCreateThreadId(userPhone, channelType);
+    }
+  }
+
+  /**
+   * Get the remaining time for a thread
+   * @param userPhone The user's phone number
+   * @returns The remaining time in seconds, or -1 if not found
+   */
+  async getThreadTimeRemaining(userPhone: string): Promise<number> {
+    try {
+      const key = `thread:${userPhone}:*`;
+      const ttl = await this.redisService.ttl(key);
+      return ttl;
+    } catch (error) {
+      this.logger.error('Error getting thread time remaining:', error);
+      return -1;
+    }
+  }
+
+  /**
+   * Gets thread metadata for a user
+   */
+  async getThreadMetadata(userPhone: string): Promise<ThreadMetadata | null> {
+    const key = `thread:${userPhone}:*`;
+    const data = await this.redisService.get(key);
+    return data ? JSON.parse(data) : null;
+  }
+
+  /**
+   * Explicitly ends a thread
+   */
+  async endThread(userPhone: string): Promise<void> {
+    const key = `thread:${userPhone}:*`;
+    await this.redisService.del(key);
+  }
+}
+
+
+// orchestrator-pattern/tools/index.ts
+
+import { WhatsAppFlowsModule } from '@/core/integrations/channels/whatsapp/flows/flows.module';
+import { UserService } from '@/features/user/user.service';
+import { Module } from '@nestjs/common';
+import { RegistrationTools } from './registration.tool';
+@Module({
+  imports: [WhatsAppFlowsModule],
+  providers: [RegistrationTools, UserService],
+  exports: [RegistrationTools],
+})
+export class ToolsModule {}
+
+
+// orchestrator-pattern/services/language.service.ts
+
+import { Injectable, Logger } from '@nestjs/common';
+import { ChatOpenAI } from '@langchain/openai';
+import { z } from 'zod';
+import { createReactAgent } from '@langchain/langgraph/prebuilt';
+import { HumanMessage } from '@langchain/core/messages';
+
+// Definition for language detection response
+const LanguageDetectionSchema = z.object({
+  languageCode: z
+    .string()
+    .describe('ISO language code (e.g., "en", "pt", "es", "fr")'),
+  languageName: z
+    .string()
+    .describe('Full language name (e.g., "English", "Portuguese", "Spanish")'),
+  confidence: z
+    .number()
+    .min(0)
+    .max(1)
+    .describe('Confidence score between 0 and 1'),
+});
+
+@Injectable()
+export class LanguageService {
+  private readonly logger = new Logger(LanguageService.name);
+  private readonly languageCache = new Map<string, string>();
+  private readonly detectionModel;
+
+  constructor() {
+    // Use a lightweight model for language detection
+    const model = new ChatOpenAI({
+      modelName: 'gpt-3.5-turbo',
+      temperature: 0.1,
+    });
+
+    // Create a prebuilt agent for language detection
+    this.detectionModel = createReactAgent({
+      llm: model,
+      tools: [],
+      responseFormat: {
+        schema: LanguageDetectionSchema,
+        prompt:
+          'Analyze the message and determine the language. Return only the language code, name, and confidence level.',
+      },
+    });
+  }
+
+  /**
+   * Detects the language of a message
+   * @param message The message to analyze
+   * @returns Information about the detected language
+   */
+  async detectLanguage(message: string): Promise<{
+    languageCode: string;
+    languageName: string;
+    confidence: number;
+  }> {
+    if (!message || message.trim().length === 0) {
+      return { languageCode: 'en', languageName: 'English', confidence: 1.0 };
+    }
+
+    // Check cache first
+    const cacheKey = this.generateCacheKey(message);
+    if (this.languageCache.has(cacheKey)) {
+      const cachedLanguage = this.languageCache.get(cacheKey);
+      this.logger.debug(`Using cached language detection: ${cachedLanguage}`);
+      return {
+        languageCode: cachedLanguage || 'en',
+        languageName: this.getLanguageName(cachedLanguage || 'en'),
+        confidence: 1.0,
+      };
+    }
+
+    try {
+      // Use the detection model to analyze the language
+      const result = await this.detectionModel.invoke({
+        messages: [new HumanMessage(message)],
+      });
+
+      const detection = result.structuredResponse;
+
+      // Cache the result
+      this.languageCache.set(cacheKey, detection.languageCode);
+
+      return detection;
+    } catch (error) {
+      this.logger.warn('Error detecting language', error);
+      // Default to English on failure
+      return { languageCode: 'en', languageName: 'English', confidence: 0.5 };
+    }
+  }
+
+  /**
+   * Gets language name from ISO code
+   */
+  getLanguageName(languageCode: string): string {
+    const languageMap = {
+      en: 'English',
+      pt: 'Portuguese',
+      es: 'Spanish',
+      fr: 'French',
+      de: 'German',
+      it: 'Italian',
+      ja: 'Japanese',
+      zh: 'Chinese',
+      ru: 'Russian',
+      ar: 'Arabic',
+      nl: 'Dutch',
+      pl: 'Polish',
+      ro: 'Romanian',
+      sv: 'Swedish',
+      tr: 'Turkish',
+      vi: 'Vietnamese',
+      hu: 'Hungarian',
+    };
+
+    return languageMap[languageCode as keyof typeof languageMap] || 'Unknown';
+  }
+
+  /**
+   * Generates a consistent cache key for a message
+   */
+  private generateCacheKey(message: string): string {
+    // Use first 100 chars for caching to avoid memory issues
+    return message.trim().toLowerCase().substring(0, 100);
+  }
+}
+
+
+// orchestrator-pattern/memory/tamy-memory-saver.ts
+
+import { SystemMessage } from '@langchain/core/messages';
+import { MemorySaver } from '@langchain/langgraph';
+import { Injectable, Logger } from '@nestjs/common';
+import { MemoryManagerService } from './memory-manager.service';
+
+interface MessageLike {
+  _getType?: () => string;
+  role?: string;
+  content?: string;
+  text?: string;
+}
+
+/**
+ * TamyMemoryService provides centralized memory management for maintaining
+ * context across all agents and workflows in the Tamy assistant.
+ * It handles both LangGraph's built-in memory and our semantic memory store.
+ */
+@Injectable()
+export class TamyMemoryService {
+  private readonly logger = new Logger(TamyMemoryService.name);
+  private readonly memorySaver = new MemorySaver();
+
+  constructor(private readonly memoryManager: MemoryManagerService) {}
+
+  /**
+   * Get the memory saver instance to use with LangGraph
+   */
+  getMemorySaver(): MemorySaver {
+    return this.memorySaver;
+  }
+
+  /**
+   * Process state after retrieval from memory to add semantic memory context
+   */
+  async processStateWithMemory(state: any, message: string): Promise<any> {
+    if (!state || !state.userId) {
+      return state;
+    }
+
+    try {
+      // Get relevant context from memory
+      const relevantContext = await this.memoryManager.getContextForPrompt(
+        state.userId,
+        message,
+        state.isRegistered || false,
+      );
+
+      // If state has messages array, deduplicate them first to prevent duplicates
+      if (state.messages && Array.isArray(state.messages)) {
+        // Deduplicate existing messages right away
+        state.messages = this.deduplicateMessages(state.messages);
+        this.logger.debug(
+          `Deduplicated messages from memory, count: ${state.messages.length}`,
+        );
+      }
+
+      // If we have relevant context, add it as a system message
+      if (relevantContext) {
+        // If state has messages array, add a system message with memory context
+        if (state.messages && Array.isArray(state.messages)) {
+          // Find existing system messages
+          const systemMessages = state.messages.filter(
+            (m: MessageLike) =>
+              (m._getType && m._getType() === 'system') || m.role === 'system',
+          );
+
+          // Only add if we don't already have a memory context message
+          if (
+            !systemMessages.some((m: MessageLike) =>
+              (m.content || m.text || '').includes(
+                'Relevant context from past interactions',
+              ),
+            )
+          ) {
+            // Add system message with memory at the beginning
+            const memoryMessage = new SystemMessage(relevantContext);
+            state.messages = [
+              memoryMessage,
+              ...this.pruneMessages(state.messages),
+            ];
+          }
+        }
+
+        // Add to memoryContext if that field exists
+        if (state.memoryContext) {
+          state.memoryContext.relevantHistory = relevantContext;
+          state.memoryContext.lastInteraction = new Date();
+        } else {
+          state.memoryContext = {
+            relevantHistory: relevantContext,
+            lastInteraction: new Date(),
+            currentStep: state.currentStep || 'unknown',
+          };
+        }
+      } else if (state.messages) {
+        // Still prune messages if needed, even without relevant context
+        state.messages = this.pruneMessages(state.messages);
+      }
+
+      return state;
+    } catch (error) {
+      this.logger.error('Error processing state with memory', error);
+      return state; // Return original state on error
+    }
+  }
+
+  /**
+   * Save the last AI message to semantic memory after state processing
+   */
+  async saveAIMessageToMemory(state: any): Promise<void> {
+    if (!state || !state.userId || !state.messages?.length) {
+      return;
+    }
+
+    try {
+      // Get the last message
+      const lastMessage = state.messages[
+        state.messages.length - 1
+      ] as MessageLike;
+
+      // Handle different message types (BaseMessage or plain objects)
+      const isAiMessage =
+        (lastMessage._getType && lastMessage._getType() === 'ai') ||
+        lastMessage.role === 'assistant';
+
+      if (isAiMessage) {
+        const content = lastMessage.content || lastMessage.text;
+
+        await this.memoryManager.storeConversationMemory(
+          state.userId,
+          content as string,
+          state.isRegistered || false,
+          {
+            threadId: state.threadId,
+            source: state.metadata?.lastNode || 'unknown',
+          },
+        );
+
+        this.logger.debug(`Stored memory for thread ${state.threadId}`, {
+          userId: state.userId,
+          isRegistered: state.isRegistered,
+        });
+      }
+    } catch (error) {
+      this.logger.error('Error saving AI message to memory', error);
+    }
+  }
+
+  /**
+   * Helper method to prune messages to prevent context overflow
+   */
+  pruneMessages(messages: any[], maxLength: number = 15): any[] {
+    if (!messages || messages.length <= maxLength) return messages;
+
+    // Keep system messages (for context) and most recent messages
+    const systemMessages = messages.filter(
+      (m: MessageLike) =>
+        (m._getType && m._getType() === 'system') || m.role === 'system',
+    );
+
+    const nonSystemMessages = messages.filter(
+      (m: MessageLike) =>
+        (!m._getType || m._getType() !== 'system') &&
+        (!m.role || m.role !== 'system'),
+    );
+
+    // Deduplicate messages before slicing
+    const dedupedMessages = this.deduplicateMessages(nonSystemMessages);
+
+    // Keep recent messages up to the limit minus system messages
+    const recentMessages = dedupedMessages.slice(
+      -(maxLength - systemMessages.length),
+    );
+
+    return [...systemMessages, ...recentMessages];
+  }
+
+  /**
+   * Deduplicate messages by content and type
+   * Prevents duplicate messages while maintaining conversation flow
+   */
+  deduplicateMessages(messages: any[]): any[] {
+    if (!messages || messages.length <= 1) return messages;
+
+    // Use a Map to track seen message contents
+    const messageMap = new Map<string, boolean>();
+    const idMap = new Map<string, boolean>();
+    const uniqueMessages = [];
+
+    // Process messages in reverse order to keep the newest versions when duplicates exist
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i];
+      if (!message) continue; // Skip null/undefined messages
+
+      // Track by ID if available
+      if (message.id) {
+        if (idMap.has(message.id)) continue; // Skip if we've seen this ID
+        idMap.set(message.id, true);
+      }
+
+      // Extract content based on message type
+      let content = '';
+      let type = '';
+
+      if (message._getType && typeof message._getType === 'function') {
+        // LangChain message
+        type = message._getType();
+        content =
+          typeof message.content === 'string'
+            ? message.content
+            : JSON.stringify(message.content || '');
+      } else if (message.role) {
+        // OpenAI message format
+        type = message.role;
+        content =
+          typeof message.content === 'string'
+            ? message.content
+            : JSON.stringify(message.content || '');
+      } else if (message.type) {
+        // Custom message format
+        type = message.type;
+        content =
+          typeof message.content === 'string'
+            ? message.content
+            : message.text || JSON.stringify(message.content || '');
+      }
+
+      // Skip empty or invalid messages
+      if (!type || !content) continue;
+
+      // Create a key combining type and content
+      const key = `${type}:${content}`;
+
+      // Only add if we haven't seen this exact message before
+      if (!messageMap.has(key)) {
+        messageMap.set(key, true);
+        uniqueMessages.unshift(message); // Add to front since we're processing in reverse
+      }
+    }
+
+    // Apply final limit to ensure we don't exceed reasonable size
+    const MAX_MESSAGES = 10; // Strict limit
+    if (uniqueMessages.length > MAX_MESSAGES) {
+      // Keep any system messages plus most recent messages up to the limit
+      const systemMessages = uniqueMessages.filter(
+        (m) =>
+          (m._getType &&
+            typeof m._getType === 'function' &&
+            m._getType() === 'system') ||
+          m.role === 'system',
+      );
+
+      const nonSystemMessages = uniqueMessages.filter(
+        (m) =>
+          !(
+            m._getType &&
+            typeof m._getType === 'function' &&
+            m._getType() === 'system'
+          ) && !(m.role === 'system'),
+      );
+
+      return [
+        ...systemMessages,
+        ...nonSystemMessages.slice(-(MAX_MESSAGES - systemMessages.length)),
+      ];
+    }
+
+    return uniqueMessages;
+  }
+}
+
+
+// orchestrator-pattern/types/memory.types.ts
+
+import { RegistrationSteps } from '.';
+import { Embeddings } from '@langchain/core/embeddings';
+
+export type MemoryType =
+  | 'transaction'
+  | 'preference'
+  | 'conversation'
+  | 'action'
+  | 'registration_step'
+  | 'routing_decision'
+  | 'agent_interaction';
+
+export interface FinancialMemory {
+  type: MemoryType;
+  content: string;
+  metadata: {
+    userId: string;
+    timestamp: number;
+    threadId?: string;
+    category?: string;
+    amount?: number;
+    confidence?: number;
+    source?: string;
+    // Registration specific
+    registrationStep?: RegistrationSteps;
+    stepStatus?: 'started' | 'completed' | 'failed';
+    // Routing specific
+    fromNode?: string;
+    toNode?: string;
+    routingReason?: string;
+    // Agent specific
+    agentName?: string;
+    interactionType?: 'input' | 'output' | 'error';
+  };
+}
+
+export interface MemorySearchResult {
+  memory: FinancialMemory;
+  score: number;
+}
+
+export interface MemoryStore {
+  // Store a new memory
+  addMemory(memory: FinancialMemory): Promise<void>;
+
+  // Search memories by semantic similarity
+  searchMemories(
+    query: string,
+    options?: {
+      type?: MemoryType;
+      userId?: string;
+      limit?: number;
+      minScore?: number;
+      category?: string;
+      registrationStep?: RegistrationSteps;
+      agentName?: string;
+    },
+  ): Promise<MemorySearchResult[]>;
+
+  // Get all memories for a user
+  getUserMemories(
+    userId: string,
+    type?: MemoryType,
+  ): Promise<FinancialMemory[]>;
+
+  // Delete memories by criteria
+  deleteMemories(criteria: {
+    userId?: string;
+    type?: MemoryType;
+    before?: number;
+  }): Promise<void>;
+}
+
+export interface MemoryConfig {
+  embeddings: Embeddings;
+  namespace?: string;
+  minScore?: number;
+  maxResults?: number;
+}
+
+

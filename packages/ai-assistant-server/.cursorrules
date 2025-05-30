@@ -1,0 +1,27 @@
+{
+  "name": "AI Assistant Server Package Rules",
+  "description": "Specific rules for the AI Assistant Server package, focusing on NestJS, LangGraph, and AI-specific patterns",
+  "extends": "../../.cursorrules",
+  "rules": [
+    {
+      "name": "NestJS Architecture Patterns",
+      "description": "Follow NestJS best practices for module organization, dependency injection, and service implementation. Use decorators appropriately and maintain clear module boundaries.",
+      "enforcement": "strict"
+    },
+    {
+      "name": "AI Service Integration",
+      "description": "All AI service integrations must be properly abstracted, include retry mechanisms, and handle rate limiting. Use appropriate DTOs for data transformation.",
+      "enforcement": "strict"
+    },
+    {
+      "name": "State Management",
+      "description": "Use immutable state patterns, implement proper state serialization, and ensure state transitions are tracked and logged.",
+      "enforcement": "strict"
+    },
+    {
+      "name": "Performance Optimization",
+      "description": "Implement caching where appropriate, use connection pooling for external services, and optimize memory usage in AI operations.",
+      "enforcement": "recommended"
+    }
+  ]
+}

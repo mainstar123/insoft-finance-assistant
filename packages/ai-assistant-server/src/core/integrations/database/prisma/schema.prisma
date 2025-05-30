@@ -1,0 +1,352 @@
+// Define a fonte de dados usando PostgreSQL.
+// A URL do banco é obtida a partir da variável de ambiente DATABASE_URL.
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Gera o Prisma Client para interação com o banco de dados.
+generator client {
+  provider = "prisma-client-js"
+}
+
+// -----------------------------------------------------------------------------
+// Enums
+// -----------------------------------------------------------------------------
+//
+// Enum para os tipos de transação.
+// Substitui flags booleanos para cada tipo, garantindo padronização e facilitando
+// as validações no nível da aplicação.
+enum TransactionType {
+  CREDIT // Receita ou entrada de dinheiro.
+  DEBIT // Despesa ou saída de dinheiro.
+  TRANSFER // Transferência entre contas.
+  INVESTMENT // Transação de investimento.
+  DIVIDEND // Recebimento de dividendos.
+  FEE // Cobrança de taxa.
+}
+
+// Enum para os tipos de conta.
+// Define os valores permitidos para o campo "type" do modelo Account.
+enum AccountType {
+  CHECKING // Conta corrente.
+  SAVINGS // Conta poupança.
+  INVESTMENT // Conta de investimento.
+  BROKERAGE // Conta de corretora.
+}
+
+// Enum para os gêneros.
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+// Enum para os objetivos financeiros primários.
+enum FinancialGoal {
+  SAVE_MONEY // Economizar dinheiro.
+  TRACK_EXPENSES // Acompanhar despesas diárias.
+  PAY_DEBT // Pagar dívidas.
+  BUILD_EMERGENCY_FUND // Construir fundo de emergência.
+  PLAN_RETIREMENT // Planejar aposentadoria.
+  INVEST // Investir para crescimento.
+  BUY_PROPERTY // Comprar um imóvel.
+  START_BUSINESS // Abrir um negócio.
+  EDUCATION // Investir em educação.
+  TRAVEL // Planejar uma viagem.
+  VEHICLE // Comprar um veículo.
+}
+
+// Enum for financial literacy levels
+enum FinancialLiteracyLevel {
+  NO_KNOWLEDGE // Sem conhecimento em finanças
+  BEGINNER // Iniciante
+  INTERMEDIATE // Intermediário
+  ADVANCED // Avançado
+  EXPERT // Especialista
+}
+
+// -----------------------------------------------------------------------------
+// Modelos
+// -----------------------------------------------------------------------------
+//
+// Modelo de usuário: contém informações básicas e de configuração do usuário.
+model User {
+  id                 Int           @id @default(autoincrement()) // Identificador único.
+  name               String        @db.VarChar(100) // Nome completo do usuário.
+  email              String        @unique @db.VarChar(150) // Email único.
+  phoneNumber        String?       @db.VarChar(20) // Número de telefone/WhatsApp (opcional).
+  passwordHash       String        @db.VarChar(255) // Senha criptografada.
+  termsAccepted      Boolean       @default(false) // Indica se aceitou os termos de uso.
+  marketingConsent   Boolean       @default(false) // Indica se concorda com comunicações de marketing.
+  postalCode         String?       @db.VarChar(10) // CEP do usuário
+  locale             String?       @default("pt_BR") @db.VarChar(10) // Localidade, padrão "pt_BR".
+  preferredCurrency  String?       @default("BRL") @db.VarChar(10) // Moeda preferida, padrão "BRL".
+  birthDate          DateTime?     @db.Date // Data de nascimento (opcional).
+  gender             Gender?       @default(OTHER) // Gênero (opcional).
+  createdAt          DateTime      @default(now()) @db.Timestamptz(6) // Data de criação do registro.
+  updatedAt          DateTime      @updatedAt @db.Timestamptz(6) // Data de atualização automática.
+  firstName          String?
+  lastName           String?
+  isActive           Boolean       @default(true)
+  sessions           Session[]
+  primaryFinancialGoal FinancialGoal? // Primary financial goal of the user
+  financialChallenge   String?        @db.VarChar(255) // Description of user's financial challenge
+  preferredLanguage   String?       @default("pt") @db.VarChar(5) // Preferred language for AI communications
+  financialKnowledge   FinancialLiteracyLevel @default(NO_KNOWLEDGE) // User's financial knowledge level
+
+  // Relações:
+  accounts              Account[] // Contas associadas ao usuário.
+  creditCards           CreditCard[] // Cartões de crédito do usuário.
+  transactions          Transaction[] // Transações realizadas pelo usuário.
+  budgets               Budget[] // Orçamentos definidos pelo usuário.
+  goals                 Goal[] // Metas financeiras do usuário.
+  chatSessions          ChatSession[] // Sessões de chat iniciadas pelo usuário.
+  UserFeedback          UserFeedback[] // Feedbacks enviados.
+  UserConsent           UserConsent[] // Registros de consentimento.
+  agentStateCheckpoints AgentStateCheckpoint[] // Pontos de verificação do estado do agente.
+
+  @@map("users")
+}
+
+// Modelo de conta: representa contas bancárias, de investimento ou de corretora.
+model Account {
+  id              Int         @id @default(autoincrement()) // Identificador único da conta.
+  userId          Int // Chave estrangeira referenciando o usuário proprietário.
+  name            String      @db.VarChar(100) // Nome ou apelido da conta.
+  description     String? // Descrição adicional (opcional).
+  balanceCents    Int         @default(0) // Saldo atual em centavos.
+  balanceCurrency String      @default("BRL") @db.VarChar(10) // Moeda do saldo.
+  type            AccountType @default(CHECKING) // Tipo de conta (enum AccountType).
+  isDefault       Boolean     @default(false) // Indica se é a conta padrão.
+  createdAt       DateTime    @default(now()) @db.Timestamptz(6) // Data de criação.
+  updatedAt       DateTime    @updatedAt @db.Timestamptz(6) // Data de atualização automática.
+  isArchived      Boolean     @default(false) // Indica se a conta está inativa ou arquivada.
+
+  // Relação com o usuário: se o usuário for removido, as contas associadas também serão.
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  // Relações:
+  transactions         Transaction[] // Transações vinculadas a esta conta.
+  oppositeTransactions Transaction[] @relation("OppositeAccount") // Transações onde esta conta é a "conta oposta" (ex.: transferências).
+  goals                Goal[] // Metas associadas a esta conta.
+
+  @@index([userId])
+}
+
+// Modelo de transação: registra as movimentações financeiras.
+model Transaction {
+  id                Int             @id @default(autoincrement()) // Identificador único.
+  userId            Int // Referência ao usuário que realizou a transação.
+  accountId         Int // Conta de origem ou destino.
+  oppositeAccountId Int? // Em transferências, a conta oposta.
+  investmentAsset   String? // Ativo investido (se aplicável).
+  investmentType    String? // Tipo de investimento (ex.: ações, renda fixa).
+  broker            String? // Nome da corretora, se for uma transação de investimento.
+  description       String          @db.VarChar(255) // Descrição da transação.
+  transactionDate   DateTime        @db.Date // Data em que ocorreu a transação.
+  amountCents       Int // Valor da transação em centavos.
+  categoryId        Int? // Categoria para classificação (opcional).
+  subCategoryId     Int? // Subcategoria (opcional).
+  invoiceId         Int? // Fatura associada, se houver (opcional).
+  currency          String          @default("BRL") @db.VarChar(10) // Moeda utilizada.
+  isArchived        Boolean         @default(false) // Indica se a transação está arquivada.
+  isPaid            Boolean         @default(false) // Indica se a transação foi paga.
+  transactionType   TransactionType @default(DEBIT) // Tipo de transação (enum TransactionType).
+
+  createdAt DateTime @default(now()) @db.Timestamptz(6) // Data de criação.
+  updatedAt DateTime @updatedAt @db.Timestamptz(6) // Data de atualização automática.
+
+  // Relações com outros modelos:
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  account         Account   @relation(fields: [accountId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  oppositeAccount Account?  @relation("OppositeAccount", fields: [oppositeAccountId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  category        Category? @relation("TransactionCategory", fields: [categoryId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  subCategory     Category? @relation("TransactionSubCategory", fields: [subCategoryId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  invoice         Invoice?  @relation(fields: [invoiceId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  @@index([userId, transactionDate])
+  @@index([accountId, transactionDate])
+}
+
+// Modelo de cartão de crédito.
+model CreditCard {
+  id               Int      @id @default(autoincrement()) // Identificador único do cartão.
+  userId           Int // Referência ao usuário dono do cartão.
+  name             String   @db.VarChar(100) // Nome ou apelido do cartão.
+  description      String? // Informações adicionais (opcional).
+  cardNetwork      String?  @db.VarChar(50) // Rede do cartão (ex.: 'visa', 'mastercard').
+  closingDay       Int // Dia de fechamento da fatura.
+  dueDay           Int // Dia de vencimento do pagamento.
+  limitCents       Int // Limite disponível, em centavos.
+  limitPercentage  Int      @default(0) // Percentual do limite já utilizado.
+  currentDebtCents Int      @default(0) // Dívida atual registrada, em centavos.
+  isDefault        Boolean  @default(false) // Indica se é o cartão padrão.
+  createdAt        DateTime @default(now()) @db.Timestamptz(6) // Data de criação.
+  updatedAt        DateTime @updatedAt @db.Timestamptz(6) // Data de atualização.
+  isArchived       Boolean  @default(false) // Indica se o cartão está arquivado.
+
+  // Relação com o usuário:
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  // Relação com faturas:
+  invoices Invoice[]
+  // A relação direta com transações foi removida para evitar redundância.
+}
+
+// Modelo de fatura associada a um cartão de crédito.
+model Invoice {
+  id           Int      @id @default(autoincrement()) // Identificador único da fatura.
+  creditCardId Int // Chave estrangeira para o cartão de crédito.
+  invoiceDate  DateTime @db.Date // Data da fatura.
+  closingDate  DateTime @db.Date // Data de fechamento da fatura.
+  amountCents  Int      @default(0) // Valor total da fatura em centavos.
+  createdAt    DateTime @default(now()) @db.Timestamptz(6) // Data de criação.
+  updatedAt    DateTime @updatedAt @db.Timestamptz(6) // Data de atualização automática.
+  isArchived   Boolean  @default(false) // Indica se a fatura está arquivada.
+  isPaid       Boolean  @default(false) // Indica se a fatura foi paga.
+
+  // Relação com o cartão de crédito (cascade deletes):
+  creditCard CreditCard @relation(fields: [creditCardId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  // Relação com transações associadas a esta fatura:
+  transactions Transaction[]
+}
+
+// Modelo de categoria para classificar transações e orçamentos.
+model Category {
+  id          Int      @id @default(autoincrement()) // Identificador único da categoria.
+  userId      Int? // Pode ser associada a um usuário específico ou ser global.
+  name        String   @db.VarChar(100) // Nome da categoria.
+  description String? // Descrição ou observações (opcional).
+  color       String?  @db.VarChar(7) // Código hexadecimal da cor.
+  parentId    Int? // Referência à categoria pai, para hierarquização.
+  createdAt   DateTime @default(now()) @db.Timestamptz(6) // Data de criação.
+
+  // Relações hierárquicas:
+  parent   Category?  @relation("CategoryHierarchy", fields: [parentId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+  children Category[] @relation("CategoryHierarchy")
+
+  // Relações com transações e orçamentos:
+  transactionsAsCategory    Transaction[] @relation("TransactionCategory")
+  transactionsAsSubCategory Transaction[] @relation("TransactionSubCategory")
+  budgets                   Budget[]
+
+  @@index([parentId])
+}
+
+// Modelo de orçamento para controle financeiro em um determinado período.
+model Budget {
+  id             Int      @id @default(autoincrement()) // Identificador único do orçamento.
+  userId         Int // Referência ao usuário dono do orçamento.
+  categoryId     Int? // Categoria associada, se houver.
+  isGeneral      Boolean  @default(false) // Verdadeiro se o orçamento for geral (sem categoria específica).
+  period         DateTime @db.Date // Período do orçamento (por exemplo, mês/ano).
+  amountCents    Int      @default(0) // Valor total previsto (em centavos).
+  spentCents     Int      @default(0) // Valor já utilizado (em centavos).
+  remainingCents Int      @default(0) // Valor restante (em centavos).
+  isArchived     Boolean  @default(false) // Indica se o orçamento está arquivado.
+  createdAt      DateTime @default(now()) @db.Timestamptz(6) // Data de criação.
+
+  // Relações:
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  category Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+
+  @@index([userId, period])
+}
+
+// Modelo de meta financeira (goal), para definir objetivos de poupança ou investimento.
+model Goal {
+  id                 Int       @id @default(autoincrement()) // Identificador único da meta.
+  userId             Int // Chave estrangeira para o usuário.
+  accountId          Int? // Conta associada à meta, se aplicável (ex.: conta poupança ou de corretora).
+  name               String    @db.VarChar(150) // Nome da meta.
+  description        String? // Descrição detalhada (opcional).
+  targetAmountCents  Int // Valor-alvo a ser alcançado (em centavos).
+  currentAmountCents Int       @default(0) // Valor acumulado até o momento (em centavos).
+  dueDate            DateTime? @db.Date // Data limite para atingir a meta (opcional).
+  achieved           Boolean   @default(false) // Indica se a meta foi alcançada.
+  createdAt          DateTime  @default(now()) @db.Timestamptz(6) // Data de criação.
+  updatedAt          DateTime  @updatedAt @db.Timestamptz(6) // Data de atualização automática.
+
+  // Relações:
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  account Account? @relation(fields: [accountId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+}
+
+// Modelo de sessão de chat, para armazenar as interações entre usuário e sistema (ou bot).
+model ChatSession {
+  id        Int      @id @default(autoincrement()) // Identificador único da sessão.
+  userId    Int // Referência ao usuário que iniciou a sessão.
+  startedAt DateTime @default(now()) @db.Timestamptz(6) // Data e hora de início.
+  status    String   @db.VarChar(50) // Status da sessão (ex.: 'active', 'closed').
+
+  // Relação com o usuário:
+  user     User          @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  messages ChatMessage[] // Mensagens enviadas nesta sessão.
+
+  @@index([userId])
+}
+
+// Modelo de mensagem de chat, registrando cada mensagem trocada na sessão.
+model ChatMessage {
+  id        Int      @id @default(autoincrement()) // Identificador único da mensagem.
+  sessionId Int // Chave estrangeira para a sessão de chat.
+  sender    String   @db.VarChar(20) // Remetente: 'user' ou 'bot'.
+  message   String // Conteúdo da mensagem.
+  timestamp DateTime @default(now()) @db.Timestamptz(6) // Data e hora do envio.
+
+  // Relação com a sessão de chat:
+  session ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([sessionId])
+}
+
+// Modelo para feedback do usuário, permitindo registrar respostas e comentários.
+model UserFeedback {
+  id           Int      @id @default(autoincrement()) // Identificador único do feedback.
+  userId       Int? // Referência ao usuário (opcional, se for anônimo).
+  submittedAt  DateTime @default(now()) @db.Timestamptz(6) // Data e hora do envio.
+  answers      Json // Respostas do usuário em formato JSON.
+  openComments String? // Comentários adicionais (opcional).
+
+  // Relação com User: se o usuário for deletado, este campo será definido como null.
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull, onUpdate: Cascade)
+}
+
+// Modelo para registro de consentimento do usuário (ex.: termos de uso, marketing).
+model UserConsent {
+  id          Int      @id @default(autoincrement()) // Identificador único do consentimento.
+  userId      Int // Chave estrangeira para o usuário.
+  consentType String   @db.VarChar(100) // Tipo de consentimento (ex.: 'termos', 'marketing').
+  consentedAt DateTime @default(now()) @db.Timestamptz(6) // Data e hora do consentimento.
+
+  // Relação com User: se o usuário for removido, o registro de consentimento também é removido.
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+}
+
+model AgentStateCheckpoint {
+  id        String   @id @default(uuid())
+  userId    Int
+  sessionId String
+  state     Json
+  timestamp DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@index([userId, sessionId])
+  @@index([sessionId, timestamp(sort: Desc)])
+  @@map("agent_state_checkpoints")
+}
+
+model Session {
+  id           String   @id @default(uuid())
+  userId       Int
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token        String   @unique
+  device       String?
+  lastActivity DateTime @default(now())
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+
+  @@map("sessions")
+}

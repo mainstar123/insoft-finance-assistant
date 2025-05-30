@@ -1,0 +1,535 @@
+{
+  "version": "7.0",
+  "data_api_version": "3.0",
+  "routing_model": {
+    "ENTRY": ["ACCOUNT_CREATION_BASIC"],
+    "ACCOUNT_CREATION_BASIC": ["ACCOUNT_CREATION_PERSONAL"],
+    "ACCOUNT_CREATION_PERSONAL": ["ACCOUNT_CREATION_GOALS"],
+    "ACCOUNT_CREATION_GOALS": ["ACCOUNT_CREATION_SUCCESS"]
+  },
+  "screens": [
+    {
+      "id": "ENTRY",
+      "title": "Bem-vindo ao Tamy Finance",
+      "data": {},
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          {
+            "type": "TextHeading",
+            "text": "Bem-vindo ao Tamy Finance"
+          },
+          {
+            "type": "TextBody",
+            "text": "Seu assistente financeiro pessoal que ajuda você a gerenciar seu dinheiro com facilidade."
+          },
+          {
+            "type": "TextBody",
+            "text": "Acompanhe despesas, defina orçamentos, gerencie contas e alcance seus objetivos financeiros - tudo em um só lugar."
+          },
+          {
+            "type": "Footer",
+            "label": "Criar Conta",
+            "on-click-action": {
+              "name": "navigate",
+              "next": {
+                "type": "screen",
+                "name": "ACCOUNT_CREATION_BASIC"
+              },
+              "payload": {}
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "ACCOUNT_CREATION_BASIC",
+      "title": "Crie sua conta",
+      "data": {},
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          {
+            "type": "Form",
+            "name": "account_creation_basic_form",
+            "children": [
+              {
+                "type": "TextHeading",
+                "text": "Crie sua conta"
+              },
+              {
+                "type": "TextBody",
+                "text": "Etapa 1 de 4: Vamos configurar sua conta Tamy Finance com algumas informações básicas."
+              },
+              {
+                "type": "TextBody",
+                "text": "Digite seu nome completo"
+              },
+              {
+                "type": "TextInput",
+                "required": true,
+                "label": "Nome Completo",
+                "name": "name",
+                "input-type": "text"
+              },
+              {
+                "type": "TextBody",
+                "text": "Digite seu endereço de e-mail"
+              },
+              {
+                "type": "TextInput",
+                "required": true,
+                "label": "Endereço de e-mail",
+                "name": "email",
+                "input-type": "email"
+              },
+              {
+                "type": "TextBody",
+                "text": "Crie uma senha (mínimo de 6 caracteres)"
+              },
+              {
+                "type": "TextInput",
+                "required": true,
+                "label": "Senha",
+                "name": "password",
+                "input-type": "password"
+              },
+              {
+                "type": "TextBody",
+                "text": "Ao criar uma conta, você concorda com nossos Termos de Serviço e Política de Privacidade."
+              },
+              {
+                "type": "OptIn",
+                "name": "termsAccepted",
+                "label": "Eu concordo com os Termos e Condições",
+                "required": true
+              },
+              {
+                "type": "Footer",
+                "label": "Continuar",
+                "on-click-action": {
+                  "name": "navigate",
+                  "next": {
+                    "type": "screen",
+                    "name": "ACCOUNT_CREATION_PERSONAL"
+                  },
+                  "payload": {
+                    "name": "${form.name}",
+                    "email": "${form.email}",
+                    "password": "${form.password}",
+                    "termsAccepted": "${form.termsAccepted}"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "ACCOUNT_CREATION_PERSONAL",
+      "title": "Informações Pessoais",
+      "data": {
+        "name": {
+          "type": "string",
+          "__example__": "João Silva"
+        },
+        "email": {
+          "type": "string",
+          "__example__": "joao.silva@exemplo.com"
+        },
+        "password": {
+          "type": "string",
+          "__example__": "senha123"
+        },
+        "termsAccepted": {
+          "type": "boolean",
+          "__example__": true
+        }
+      },
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          {
+            "type": "Form",
+            "name": "account_personal_form",
+            "children": [
+              {
+                "type": "TextHeading",
+                "text": "Informações Pessoais"
+              },
+              {
+                "type": "TextBody",
+                "text": "Etapa 2 de 4: Conte-nos um pouco mais sobre você para personalizar sua experiência."
+              },
+              {
+                "type": "TextBody",
+                "text": "Digite sua data de nascimento (para conselhos financeiros adequados à sua idade)"
+              },
+              {
+                "type": "DatePicker",
+                "label": "Data de Nascimento",
+                "name": "birthDate",
+                "required": true
+              },
+              {
+                "type": "RadioButtonsGroup",
+                "name": "gender",
+                "label": "Selecione seu gênero (para experiência personalizada)",
+                "data-source": [
+                  {
+                    "id": "MALE",
+                    "title": "Masculino"
+                  },
+                  {
+                    "id": "FEMALE",
+                    "title": "Feminino"
+                  },
+                  {
+                    "id": "OTHER",
+                    "title": "Outro"
+                  }
+                ],
+                "required": true
+              },
+              {
+                "type": "TextBody",
+                "text": "Selecione seu país (para configurações de moeda e regionais)"
+              },
+              {
+                "type": "Dropdown",
+                "required": true,
+                "name": "country",
+                "label": "País",
+                "data-source": [
+                  {
+                    "id": "Brazil",
+                    "title": "Brasil"
+                  },
+                  {
+                    "id": "United States",
+                    "title": "Estados Unidos"
+                  },
+                  {
+                    "id": "United Kingdom",
+                    "title": "Reino Unido"
+                  },
+                  {
+                    "id": "Canada",
+                    "title": "Canadá"
+                  },
+                  {
+                    "id": "Australia",
+                    "title": "Austrália"
+                  },
+                  {
+                    "id": "Germany",
+                    "title": "Alemanha"
+                  },
+                  {
+                    "id": "France",
+                    "title": "França"
+                  },
+                  {
+                    "id": "Japan",
+                    "title": "Japão"
+                  },
+                  {
+                    "id": "China",
+                    "title": "China"
+                  },
+                  {
+                    "id": "India",
+                    "title": "Índia"
+                  },
+                  {
+                    "id": "Mexico",
+                    "title": "México"
+                  },
+                  {
+                    "id": "Argentina",
+                    "title": "Argentina"
+                  },
+                  {
+                    "id": "Chile",
+                    "title": "Chile"
+                  },
+                  {
+                    "id": "Colombia",
+                    "title": "Colômbia"
+                  },
+                  {
+                    "id": "Peru",
+                    "title": "Peru"
+                  },
+                  {
+                    "id": "Other",
+                    "title": "Outro"
+                  }
+                ]
+              },
+              {
+                "type": "Footer",
+                "label": "Continuar",
+                "on-click-action": {
+                  "name": "navigate",
+                  "next": {
+                    "type": "screen",
+                    "name": "ACCOUNT_CREATION_GOALS"
+                  },
+                  "payload": {
+                    "name": "${data.name}",
+                    "email": "${data.email}",
+                    "password": "${data.password}",
+                    "termsAccepted": "${data.termsAccepted}",
+                    "birthDate": "${form.birthDate}",
+                    "gender": "${form.gender}",
+                    "country": "${form.country}"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "ACCOUNT_CREATION_GOALS",
+      "title": "Objetivos Financeiros",
+      "data": {
+        "name": {
+          "type": "string",
+          "__example__": "João Silva"
+        },
+        "email": {
+          "type": "string",
+          "__example__": "joao.silva@exemplo.com"
+        },
+        "password": {
+          "type": "string",
+          "__example__": "senha123"
+        },
+        "termsAccepted": {
+          "type": "boolean",
+          "__example__": true
+        },
+        "birthDate": {
+          "type": "string",
+          "__example__": "1990-01-01"
+        },
+        "gender": {
+          "type": "string",
+          "__example__": "Masculino"
+        },
+        "country": {
+          "type": "string",
+          "__example__": "Brasil"
+        }
+      },
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          {
+            "type": "Form",
+            "name": "account_goals_form",
+            "children": [
+              {
+                "type": "TextHeading",
+                "text": "Objetivos Financeiros"
+              },
+              {
+                "type": "TextBody",
+                "text": "Etapa 3 de 4: Informe-nos sobre seus objetivos financeiros para ajudarmos a personalizar sua experiência."
+              },
+              {
+                "type": "TextBody",
+                "text": "Qual é o seu principal objetivo financeiro?"
+              },
+              {
+                "type": "RadioButtonsGroup",
+                "name": "financialGoal",
+                "label": "Selecione seu objetivo principal",
+                "required": true,
+                "data-source": [
+                  {
+                    "id": "SAVE_MONEY",
+                    "title": "Economizar dinheiro"
+                  },
+                  {
+                    "id": "TRACK_EXPENSES",
+                    "title": "Acompanhar despesas diárias"
+                  },
+                  {
+                    "id": "PAY_DEBT",
+                    "title": "Pagar dívidas"
+                  },
+                  {
+                    "id": "BUILD_EMERGENCY_FUND",
+                    "title": "Criar fundo de emergência"
+                  },
+                  {
+                    "id": "PLAN_RETIREMENT",
+                    "title": "Planejar aposentadoria"
+                  },
+                  {
+                    "id": "INVEST",
+                    "title": "Investir para crescimento"
+                  }
+                ]
+              },
+              {
+                "type": "TextBody",
+                "text": "Qual é o seu maior desafio financeiro no momento?"
+              },
+              {
+                "type": "TextInput",
+                "required": false,
+                "label": "Desafio Financeiro",
+                "name": "financialChallenge",
+                "input-type": "text"
+              },
+              {
+                "type": "TextBody",
+                "text": "Enviaremos atualizações ocasionais sobre novos recursos e promoções."
+              },
+              {
+                "type": "OptIn",
+                "name": "marketingConsent",
+                "label": "Gostaria de receber notícias e ofertas especiais"
+              },
+              {
+                "type": "Footer",
+                "label": "Criar Conta",
+                "on-click-action": {
+                  "name": "navigate",
+                  "next": {
+                    "type": "screen",
+                    "name": "ACCOUNT_CREATION_SUCCESS"
+                  },
+                  "payload": {
+                    "name": "${data.name}",
+                    "email": "${data.email}",
+                    "password": "${data.password}",
+                    "termsAccepted": "${data.termsAccepted}",
+                    "birthDate": "${data.birthDate}",
+                    "gender": "${data.gender}",
+                    "country": "${data.country}",
+                    "financialGoal": "${form.financialGoal}",
+                    "financialChallenge": "${form.financialChallenge}",
+                    "marketingConsent": "${form.marketingConsent}"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "ACCOUNT_CREATION_SUCCESS",
+      "title": "Conta Criada",
+      "terminal": true,
+      "success": true,
+      "data": {
+        "name": {
+          "type": "string",
+          "__example__": "João Silva"
+        },
+        "email": {
+          "type": "string",
+          "__example__": "joao.silva@exemplo.com"
+        },
+        "password": {
+          "type": "string",
+          "__example__": "senha123"
+        },
+        "termsAccepted": {
+          "type": "boolean",
+          "__example__": true
+        },
+        "birthDate": {
+          "type": "string",
+          "__example__": "1990-01-01"
+        },
+        "gender": {
+          "type": "string",
+          "__example__": "Masculino"
+        },
+        "country": {
+          "type": "string",
+          "__example__": "Brasil"
+        },
+        "financialGoal": {
+          "type": "string",
+          "__example__": "SAVE_MONEY"
+        },
+        "financialChallenge": {
+          "type": "string",
+          "__example__": "Despesas inesperadas"
+        },
+        "marketingConsent": {
+          "type": "boolean",
+          "__example__": true
+        }
+      },
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          {
+            "type": "Form",
+            "name": "account_success_form",
+            "children": [
+              {
+                "type": "TextHeading",
+                "text": "Bem-vindo ao Tamy Finance!"
+              },
+              {
+                "type": "TextBody",
+                "text": "Etapa 4 de 4: Sua conta foi criada com sucesso."
+              },
+              {
+                "type": "TextBody",
+                "text": "Veja o que você pode fazer a seguir:"
+              },
+              {
+                "type": "TextBody",
+                "text": "1. Configure sua primeira conta (corrente, poupança ou investimento)"
+              },
+              {
+                "type": "TextBody",
+                "text": "2. Crie um orçamento mensal para acompanhar seus gastos"
+              },
+              {
+                "type": "TextBody",
+                "text": "3. Registre sua primeira transação"
+              },
+              {
+                "type": "TextBody",
+                "text": "4. Defina um objetivo financeiro com uma data alvo"
+              },
+              {
+                "type": "Footer",
+                "label": "Começar",
+                "on-click-action": {
+                  "name": "data_exchange",
+                  "payload": {
+                    "name": "${data.name}",
+                    "email": "${data.email}",
+                    "password": "${data.password}",
+                    "termsAccepted": "${data.termsAccepted}",
+                    "birthDate": "${data.birthDate}",
+                    "gender": "${data.gender}",
+                    "country": "${data.country}",
+                    "financialGoal": "${data.financialGoal}",
+                    "financialChallenge": "${data.financialChallenge}",
+                    "marketingConsent": "${data.marketingConsent}"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
