@@ -140,4 +140,4 @@ This project is licensed under the [MIT License](LICENSE).
 
 ## Contact
 
-For questions or support, please contact the development team at [dev@tamy.finance](mailto:dev@tamy.finance).
+For questions or support, please contact the development team at [dev@insoft.ai](mailto:dev@tamy.finance).
