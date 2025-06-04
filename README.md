@@ -2,7 +2,7 @@
 
 Tamy Finance Assistant is an AI-powered personal financial assistant designed to help users achieve their financial goals through education and intelligent financial management. The name "Tamy" stands for "Talking About Money," reflecting our mission to remove the taboo around discussing money matters while providing a conversational interface for financial management.
 
-## Project Structure
+## Project Overview
 
 This is a monorepo containing the following packages:
 
